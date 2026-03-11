@@ -787,6 +787,18 @@ config MAX_DIRTY_THRESH_PAGES
 config BALANCE_ANON_FILE_RECLAIM
 	bool "During reclaim treat anon and file backed pages equally"
 	depends on SWAP
+
+config LRU_GEN
+	bool "Multi-Gen LRU"
+	depends on MMU
+	help
+	  A high performance LRU framework to reduce kswapd CPU usage.
+
+config LRU_GEN_ENABLED
+	bool "Enable by default"
+	depends on LRU_GEN
+	help
+	  Enable the Multi-Gen LRU by default.
 	help
 	  When performing memory reclaim treat anonymous and file backed pages
 	  equally.
