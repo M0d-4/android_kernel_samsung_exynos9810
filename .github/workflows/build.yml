@@ -1,0 +1,151 @@
+name: Build star2lte kernel (AnyKernel3)
+
+on:
+  workflow_dispatch:
+    inputs:
+      wake_gestures:
+        description: "Enable CONFIG_WAKE_GESTURES (double-tap / sweep to wake)"
+        type: boolean
+        default: true
+      custom_forcetouch:
+        description: "Enable CONFIG_CUSTOM_FORCETOUCH (home-key force touch handler)"
+        type: boolean
+        default: false
+      clang_url:
+        description: "Optional: toolchain .tar.gz URL (must contain bin/clang at its root)"
+        type: string
+        default: ""
+      release:
+        description: "Also publish the zip as a GitHub release"
+        type: boolean
+        default: false
+  push:
+    branches: [main, master]
+    paths-ignore:
+      - "**.md"
+
+concurrency:
+  group: build-star2lte-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    permissions:
+      contents: write # only used by the optional release step
+    env:
+      DEFCONFIG: exynos9810-star2lte_defconfig
+      # Android 12 prebuilt clang 12 - a good match for this 4.9 tree.
+      DEFAULT_CLANG_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android12-release/clang-r416183b.tar.gz
+      AK3_REPO: https://github.com/osm0sis/AnyKernel3.git
+      AK3_REF: master
+      # Push builds use the defaults (wake gestures on, force touch off).
+      WAKE_GESTURES: ${{ github.event_name != 'workflow_dispatch' || inputs.wake_gestures }}
+      CUSTOM_FORCETOUCH: ${{ github.event_name == 'workflow_dispatch' && inputs.custom_forcetouch }}
+      RELEASE: ${{ github.event_name == 'workflow_dispatch' && inputs.release }}
+      KMAKE_FLAGS: >-
+        O=out ARCH=arm64 CC=clang HOSTCC=gcc HOSTCXX=g++
+        CROSS_COMPILE=aarch64-linux-gnu- CLANG_TRIPLE=aarch64-linux-gnu-
+        KBUILD_BUILD_USER=github-actions KBUILD_BUILD_HOST=github
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc bison flex libssl-dev libelf-dev cpio kmod xz-utils lz4 zip unzip curl git \
+            device-tree-compiler python3 \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
+
+      - name: Set up clang
+        env:
+          CLANG_URL_INPUT: ${{ github.event_name == 'workflow_dispatch' && inputs.clang_url || '' }}
+        run: |
+          url="${CLANG_URL_INPUT:-$DEFAULT_CLANG_URL}"
+          mkdir -p "$HOME/clang"
+          if curl -fL --retry 3 --retry-delay 5 -o "$RUNNER_TEMP/clang.tgz" "$url" \
+             && tar -xzf "$RUNNER_TEMP/clang.tgz" -C "$HOME/clang" \
+             && "$HOME/clang/bin/clang" --version; then
+            echo "$HOME/clang/bin" >> "$GITHUB_PATH"
+            echo "Using prebuilt clang from $url"
+          else
+            echo "::warning::Could not use the prebuilt clang, falling back to the distro clang"
+            rm -rf "$HOME/clang"
+            sudo apt-get install -y --no-install-recommends clang
+            # Newer clang turns several old-C mistakes into hard errors; keep them as warnings.
+            flags=""
+            for w in incompatible-function-pointer-types int-conversion implicit-function-declaration \
+                     implicit-int deprecated-non-prototype; do
+              if clang -Werror=unknown-warning-option -Wno-error=$w -x c -fsyntax-only /dev/null 2>/dev/null; then
+                flags="$flags -Wno-error=$w"
+              fi
+            done
+            echo "KCFLAGS=$flags" >> "$GITHUB_ENV"
+            clang --version
+          fi
+
+      - name: Configure kernel
+        run: |
+          make $KMAKE_FLAGS "$DEFCONFIG"
+
+          cfg="scripts/config --file out/.config"
+          if [ "$WAKE_GESTURES" = "true" ]; then $cfg -e WAKE_GESTURES; else $cfg -d WAKE_GESTURES; fi
+          if [ "$CUSTOM_FORCETOUCH" = "true" ]; then $cfg -e CUSTOM_FORCETOUCH; else $cfg -d CUSTOM_FORCETOUCH; fi
+          make $KMAKE_FLAGS olddefconfig
+
+          grep -E '^(# )?CONFIG_(WAKE_GESTURES|CUSTOM_FORCETOUCH|TOUCHSCREEN_SEC_TS|SEC_HAPTIC|DTS_9810_STAR2)[ =]' out/.config || true
+          if [ "$WAKE_GESTURES" = "true" ] && ! grep -q '^CONFIG_WAKE_GESTURES=y' out/.config; then
+            echo "::error::CONFIG_WAKE_GESTURES did not stick (it needs CONFIG_SEC_HAPTIC=y)"; exit 1
+          fi
+
+      - name: Build Image and dt.img
+        run: |
+          # Image.samsung builds vmlinux + the star2lte DTB, then arch/arm64/boot/{Image,dt.img}
+          make $KMAKE_FLAGS -j"$(nproc)" Image.samsung
+          ls -l out/arch/arm64/boot/Image out/arch/arm64/boot/dt.img
+          python3 scripts/samsung_bootimg.py inspect out/arch/arm64/boot/Image.samsung
+
+      - name: Package with AnyKernel3
+        run: |
+          kver="$(cat out/include/config/kernel.release)"
+          stamp="$(date -u +%Y%m%d)"
+          zip_name="star2lte-${kver}-${stamp}-${GITHUB_SHA::7}.zip"
+
+          git clone --depth=1 --branch "$AK3_REF" "$AK3_REPO" AnyKernel3
+          rm -rf AnyKernel3/.git AnyKernel3/.github AnyKernel3/README.md
+
+          cp anykernel/anykernel.sh AnyKernel3/anykernel.sh
+          sed -i "s|^kernel.string=.*|kernel.string=star2lte ${kver} (${stamp})|" AnyKernel3/anykernel.sh
+
+          cp out/arch/arm64/boot/Image  AnyKernel3/Image
+          cp out/arch/arm64/boot/dt.img AnyKernel3/dt.img
+
+          (cd AnyKernel3 && zip -r9 "$GITHUB_WORKSPACE/$zip_name" . -x '*placeholder' '.git*')
+          unzip -l "$zip_name"
+          echo "ZIP_NAME=$zip_name" >> "$GITHUB_ENV"
+
+      - name: Upload flashable zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: star2lte-anykernel3
+          path: ${{ env.ZIP_NAME }}
+          if-no-files-found: error
+
+      - name: Upload build config
+        uses: actions/upload-artifact@v4
+        with:
+          name: star2lte-config
+          path: out/.config
+
+      - name: Publish release
+        if: env.RELEASE == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "star2lte-${{ github.run_number }}" "$ZIP_NAME" \
+            --title "star2lte build ${{ github.run_number }}" \
+            --notes "Built from ${GITHUB_SHA::7}. Flash in recovery."
