@@ -809,7 +809,9 @@
 #define SW_MUTE_DEVICE		0x0e  /* set = device disabled */
 #define SW_PEN_INSERTED		0x0f  /* set = pen inserted */
 #define SW_MACHINE_COVER	0x10  /* set = cover closed */
-#define SW_MAX			0x10
+/* Used by the Samsung touchscreen drivers; 0x0f is already SW_PEN_INSERTED here */
+#define SW_GLOVE		0x11  /* set = glove mode */
+#define SW_MAX			0x11
 #define SW_CNT			(SW_MAX+1)
 
 /*

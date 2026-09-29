@@ -10,6 +10,16 @@
  * published by the Free Software Foundation.
  */
 
+#ifdef CONFIG_WAKE_GESTURES
+#include <linux/kernel.h>
+#include <linux/wake_gestures.h>
+static bool is_suspended;
+bool scr_suspended(void)
+{
+	return is_suspended;
+}
+#endif
+
 struct sec_ts_data *tsp_info;
 
 #include "sec_ts.h"
@@ -923,38 +933,6 @@ void location_detect(struct sec_ts_data *ts, char *loc, int x, int y)
 }
 
 
-static bool sec_ts_lpm_single_tap_dt2w(struct sec_ts_data *ts, int x, int y)
-{
-	static unsigned long last_tap_jiffies;
-	static int last_x;
-	static int last_y;
-	unsigned long now = jiffies;
-	int dx = abs(x - last_x);
-	int dy = abs(y - last_y);
-	bool matched;
-
-	matched = time_after(now, last_tap_jiffies + msecs_to_jiffies(40)) &&
-		  time_before(now, last_tap_jiffies + msecs_to_jiffies(450)) &&
-		  dx < 250 &&
-		  dy < 250;
-
-	if (matched) {
-		input_info(true, &ts->client->dev,
-			   "%s: LPM single-tap DT2W match (%d,%d) dx:%d dy:%d\n",
-			   __func__, x, y, dx, dy);
-		last_tap_jiffies = 0;
-		last_x = 0;
-		last_y = 0;
-		return true;
-	}
-
-	last_tap_jiffies = now;
-	last_x = x;
-	last_y = y;
-
-	return false;
-}
-
 #define MAX_EVENT_COUNT 32
 static void sec_ts_read_event(struct sec_ts_data *ts)
 {
@@ -1328,14 +1306,21 @@ static void sec_ts_read_event(struct sec_ts_data *ts)
 
 						if ((ts->coord[t_id].ttype == SEC_TS_TOUCHTYPE_GLOVE) && !ts->touchkey_glove_mode_status) {
 							ts->touchkey_glove_mode_status = true;
+							input_report_switch(ts->input_dev, SW_GLOVE, 1);
 						} else if ((ts->coord[t_id].ttype != SEC_TS_TOUCHTYPE_GLOVE) && ts->touchkey_glove_mode_status) {
 							ts->touchkey_glove_mode_status = false;
+							input_report_switch(ts->input_dev, SW_GLOVE, 0);
 						}
 
 						input_mt_slot(ts->input_dev, t_id);
 						input_mt_report_slot_state(ts->input_dev, MT_TOOL_FINGER, 1);
 						input_report_key(ts->input_dev, BTN_TOUCH, 1);
 						input_report_key(ts->input_dev, BTN_TOOL_FINGER, 1);
+
+#ifdef CONFIG_WAKE_GESTURES
+						if (is_suspended)
+							ts->coord[t_id].x += 5000;
+#endif
 
 						input_report_abs(ts->input_dev, ABS_MT_POSITION_X, ts->coord[t_id].x);
 						input_report_abs(ts->input_dev, ABS_MT_POSITION_Y, ts->coord[t_id].y);
@@ -1400,15 +1385,7 @@ static void sec_ts_read_event(struct sec_ts_data *ts)
 				input_info(true, &ts->client->dev, "%s: AOD: %d, %d, %d\n",
 						__func__, ts->scrub_id, ts->scrub_x, ts->scrub_y);
 #endif
-				if (ts->power_status == SEC_TS_STATE_LPM) {
-					input_report_key(ts->input_dev, KEY_POWER, 1);
-					input_sync(ts->input_dev);
-					input_report_key(ts->input_dev, KEY_POWER, 0);
-					input_sync(ts->input_dev);
-				} else {
-					input_report_key(ts->input_dev, KEY_BLACK_UI_GESTURE, 1);
-				}
-
+				input_report_key(ts->input_dev, KEY_BLACK_UI_GESTURE, 1);
 				ts->all_aod_tap_count++;
 				break;
 			case SEC_TS_GESTURE_CODE_SINGLE_TAP:
@@ -1424,18 +1401,10 @@ static void sec_ts_read_event(struct sec_ts_data *ts)
 				input_info(true, &ts->client->dev, "%s: SINGLE TAP: %d, %d, %d\n",
 						__func__, ts->scrub_id, ts->scrub_x, ts->scrub_y);
 #endif
-				if (ts->power_status == SEC_TS_STATE_LPM) {
-					if (sec_ts_lpm_single_tap_dt2w(ts, ts->scrub_x, ts->scrub_y)) {
-						input_report_key(ts->input_dev, KEY_POWER, 1);
-						input_sync(ts->input_dev);
-						input_report_key(ts->input_dev, KEY_POWER, 0);
-						input_sync(ts->input_dev);
-					}
-				} else {
-					input_report_key(ts->input_dev, KEY_BLACK_UI_GESTURE, 1);
-				}
+				input_report_key(ts->input_dev, KEY_BLACK_UI_GESTURE, 1);
 				break;
 			case SEC_TS_GESTURE_CODE_FORCE:
+#ifndef CONFIG_CUSTOM_FORCETOUCH
 				if (ts->power_status == SEC_TS_STATE_POWER_ON) {
 					if (p_gesture_status->gesture_id == SEC_TS_EVENT_PRESSURE_TOUCHED) {
 						ts->all_force_count++;
@@ -1470,6 +1439,46 @@ static void sec_ts_read_event(struct sec_ts_data *ts)
 						ts->all_force_count++;
 					}
 				}
+#else
+				if (ts->power_status == SEC_TS_STATE_POWER_ON) {
+					if (p_gesture_status->gesture_id == SEC_TS_EVENT_PRESSURE_RELEASED) {
+						input_report_key(ts->input_dev, KEY_HOMEPAGE, 0);
+						input_report_key(ts->input_dev, KEY_BLACK_UI_GESTURE, 1);
+						ts->scrub_id = SPONGE_EVENT_TYPE_AOD_HOMEKEY_RELEASE_NO_HAPTIC;
+						input_sync(ts->input_dev);
+
+						haptic_homekey_release();
+					} else {
+						input_report_key(ts->input_dev, KEY_HOMEPAGE, 1);
+						ts->scrub_id = SPONGE_EVENT_TYPE_AOD_HOMEKEY_PRESS;
+						input_sync(ts->input_dev);
+
+						haptic_homekey_press();
+						ts->all_force_count++;
+					}
+
+					if (ts->pressure_setting_mode)
+						input_info(true, &ts->client->dev, "%s: skip force events in pressure setting mode\n", __func__);
+					else
+						input_report_key(ts->input_dev, KEY_BLACK_UI_GESTURE, 1);
+				} else {
+					if (p_gesture_status->gesture_id == SEC_TS_EVENT_PRESSURE_RELEASED) {
+						input_report_key(ts->input_dev, KEY_HOMEPAGE, 0);
+						input_report_key(ts->input_dev, KEY_BLACK_UI_GESTURE, 1);
+						ts->scrub_id = SPONGE_EVENT_TYPE_AOD_HOMEKEY_RELEASE_NO_HAPTIC;
+						input_sync(ts->input_dev);
+
+						haptic_homekey_release();
+					} else {
+						input_report_key(ts->input_dev, KEY_HOMEPAGE, 1);
+						ts->scrub_id = SPONGE_EVENT_TYPE_AOD_HOMEKEY_PRESS;
+						input_sync(ts->input_dev);
+
+						haptic_homekey_press();
+						ts->all_force_count++;
+					}
+				}
+#endif
 
 				ts->scrub_x = (p_gesture_status->gesture_data_1 << 4)
 							| (p_gesture_status->gesture_data_3 >> 4);
@@ -2204,7 +2213,6 @@ static void sec_ts_set_input_prop(struct sec_ts_data *ts, struct input_dev *dev,
 	set_bit(EV_SW, dev->evbit);
 	set_bit(BTN_TOUCH, dev->keybit);
 	set_bit(BTN_TOOL_FINGER, dev->keybit);
-	set_bit(KEY_POWER, dev->keybit);
 	set_bit(KEY_BLACK_UI_GESTURE, dev->keybit);
 	set_bit(KEY_INT_CANCEL, dev->keybit);
 #ifdef SEC_TS_SUPPORT_TOUCH_KEY
@@ -2225,6 +2233,8 @@ static void sec_ts_set_input_prop(struct sec_ts_data *ts, struct input_dev *dev,
 	}
 	set_bit(propbit, dev->propbit);
 	set_bit(KEY_HOMEPAGE, dev->keybit);
+
+	input_set_capability(dev, EV_SW, SW_GLOVE);
 
 	input_set_abs_params(dev, ABS_MT_POSITION_X, 0, ts->plat_data->max_x, 0, 0);
 	input_set_abs_params(dev, ABS_MT_POSITION_Y, 0, ts->plat_data->max_y, 0, 0);
@@ -2700,6 +2710,7 @@ void sec_ts_unlocked_release_all_finger(struct sec_ts_data *ts)
 
 	input_report_key(ts->input_dev, BTN_TOUCH, false);
 	input_report_key(ts->input_dev, BTN_TOOL_FINGER, false);
+	input_report_switch(ts->input_dev, SW_GLOVE, false);
 	ts->touchkey_glove_mode_status = false;
 	ts->touch_count = 0;
 	ts->check_multi = 0;
@@ -2763,6 +2774,7 @@ void sec_ts_locked_release_all_finger(struct sec_ts_data *ts)
 
 	input_report_key(ts->input_dev, BTN_TOUCH, false);
 	input_report_key(ts->input_dev, BTN_TOOL_FINGER, false);
+	input_report_switch(ts->input_dev, SW_GLOVE, false);
 	ts->touchkey_glove_mode_status = false;
 	ts->touch_count = 0;
 	ts->check_multi = 0;
@@ -3133,6 +3145,10 @@ static int sec_ts_input_open(struct input_dev *dev)
 	char addr[3] = { 0 };
 	int ret;
 
+#ifdef CONFIG_WAKE_GESTURES
+	is_suspended = false;
+#endif
+
 	if (!ts->info_work_done) {
 		input_err(true, &ts->client->dev, "%s not finished info work\n", __func__);
 		return 0;
@@ -3166,6 +3182,11 @@ static int sec_ts_input_open(struct input_dev *dev)
 #ifdef USE_RESET_EXIT_LPM
 		schedule_delayed_work(&ts->reset_work, msecs_to_jiffies(TOUCH_RESET_DWORK_TIME));
 #else
+#ifdef CONFIG_WAKE_GESTURES
+		if (s2w_switch || dt2w_switch)
+			disable_irq_wake(ts->client->irq);
+		else
+#endif
 		sec_ts_set_lowpowermode(ts, TO_TOUCH_MODE);
 #endif
 	} else {
@@ -3200,6 +3221,21 @@ static int sec_ts_input_open(struct input_dev *dev)
 
 	mutex_unlock(&ts->modechange);
 
+#ifdef CONFIG_WAKE_GESTURES
+	if (dt2w_switch_changed) {
+		dt2w_switch = dt2w_switch_temp;
+		dt2w_switch_changed = false;
+	}
+	if (dt2w_custom_tap_changed) {
+		dt2w_custom_tap = dt2w_custom_tap_temp;
+		dt2w_custom_tap_changed = false;
+	}
+	if (s2w_switch_changed) {
+		s2w_switch = s2w_switch_temp;
+		s2w_switch_changed = false;
+	}
+#endif
+
 #ifdef CONFIG_SEC_FACTORY
 	check_panel_id(ts);
 #endif
@@ -3223,6 +3259,10 @@ static void sec_ts_input_close(struct input_dev *dev)
 	struct timeval current_time;
 	int ret;
 	u8 data[6] = {SEC_TS_CMD_SPONGE_OFFSET_UTC, 0};
+
+#ifdef CONFIG_WAKE_GESTURES
+	is_suspended = true;
+#endif
 
 	if (!ts->info_work_done) {
 		input_err(true, &ts->client->dev, "%s not finished info work\n", __func__);
@@ -3284,6 +3324,11 @@ static void sec_ts_input_close(struct input_dev *dev)
 
 	ts->pressure_setting_mode = 0;
 
+#ifdef CONFIG_WAKE_GESTURES
+		if (s2w_switch || dt2w_switch)
+			enable_irq_wake(ts->client->irq);
+		else
+#endif
 	if (ts->prox_power_off) {
 		sec_ts_stop_device(ts);
 	} else {
