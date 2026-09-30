@@ -102,12 +102,10 @@ jobs:
             echo "::error::CONFIG_WAKE_GESTURES did not stick (it needs CONFIG_SEC_HAPTIC=y)"; exit 1
           fi
 
-      - name: Build Image and dt.img
+      - name: Build kernel Image
         run: |
-          # Image.samsung builds vmlinux + the star2lte DTB, then arch/arm64/boot/{Image,dt.img}
-          make $KMAKE_FLAGS -j"$(nproc)" Image.samsung
-          ls -l out/arch/arm64/boot/Image out/arch/arm64/boot/dt.img
-          python3 scripts/samsung_bootimg.py inspect out/arch/arm64/boot/Image.samsung
+          make $KMAKE_FLAGS -j"$(nproc)" Image
+          ls -l out/arch/arm64/boot/Image
 
       - name: Package with AnyKernel3
         run: |
@@ -121,8 +119,7 @@ jobs:
           cp anykernel/anykernel.sh AnyKernel3/anykernel.sh
           sed -i "s|^kernel.string=.*|kernel.string=star2lte ${kver} (${stamp})|" AnyKernel3/anykernel.sh
 
-          cp out/arch/arm64/boot/Image  AnyKernel3/Image
-          cp out/arch/arm64/boot/dt.img AnyKernel3/dt.img
+          cp out/arch/arm64/boot/Image AnyKernel3/Image
 
           (cd AnyKernel3 && zip -r9 "$GITHUB_WORKSPACE/$zip_name" . -x '*placeholder' '.git*')
           unzip -l "$zip_name"
