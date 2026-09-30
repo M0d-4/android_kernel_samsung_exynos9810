@@ -43,10 +43,10 @@ PATCH_VBMETA_FLAG=auto;
 . tools/ak3-core.sh;
 
 # boot install
-# The ramdisk is left untouched, so skip unpack/repack of it:
-# split_boot -> flash_boot swaps in the new Image (and dt.img, the DTBH device
-# tree image built by `make Image.samsung`) and keeps the device's existing
-# ramdisk, cmdline, offsets and the SEANDROIDENFORCE trailer.
+# Only the kernel Image is replaced. The ramdisk is left untouched, so skip
+# unpack/repack of it: split_boot -> flash_boot swaps in the new Image and keeps
+# the device's existing ramdisk, device tree, cmdline, offsets and the
+# SEANDROIDENFORCE trailer.
 split_boot;
 flash_boot;
 ## end boot install
