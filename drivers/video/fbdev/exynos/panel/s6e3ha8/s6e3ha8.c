@@ -10,6 +10,8 @@
  * published by the Free Software Foundation.
  */
 
+#include <linux/module.h>
+#include <linux/moduleparam.h>
 #include <linux/of_gpio.h>
 #include <video/mipi_display.h>
 /* TODO : remove dsim dependent code */
@@ -1318,6 +1320,17 @@ static int init_lpm_table(struct maptbl *tbl)
 #endif
 }
 
+/*
+ * Lowest AOD luminance step the panel may use.
+ *   0 = 2 nit, 1 = 10 nit, 2 = 30 nit, 3 = 60 nit
+ * Android drops the panel brightness to a very low value while dozing, which
+ * made the AOD land on the 2 nit step. Runtime tunable via
+ * /sys/module/s6e3ha8/parameters/aod_min_row (applies the next time AOD is entered).
+ */
+static int aod_min_row = 2;
+module_param(aod_min_row, int, 0644);
+MODULE_PARM_DESC(aod_min_row, "Minimum AOD luminance step (0=2nit 1=10nit 2=30nit 3=60nit)");
+
 static int getidx_lpm_table(struct maptbl *tbl)
 {
 	int layer = 0, row = 0;
@@ -1350,6 +1363,9 @@ static int getidx_lpm_table(struct maptbl *tbl)
 	row = get_subdev_actual_brightness_index(panel_bl,
 			PANEL_BL_SUBDEV_TYPE_AOD,
 			panel_bl->subdev[PANEL_BL_SUBDEV_TYPE_AOD].brightness);
+
+	if (row >= 0 && row < aod_min_row)
+		row = min(aod_min_row, (int)tbl->nrow - 1);
 
 	props->lpm_brightness =
 		panel_bl->subdev[PANEL_BL_SUBDEV_TYPE_AOD].brightness;
