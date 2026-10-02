@@ -948,6 +948,45 @@ static bool sec_ts_lpm_single_tap_dt2w(struct sec_ts_data *ts, int x, int y)
 	return false;
 }
 
+/*
+ * Ghost-touch blob filter.
+ *
+ * Touch logs from the star2lte show ghost touches arriving as bursts of
+ * pressure-saturated (z=63) contacts that are either far bigger than a
+ * fingertip (major 60..240; real fingertips stay at about 23 or less) or pile
+ * up as 3+ simultaneous contacts. A contact is dropped when it is pressure
+ * saturated and either
+ *   - its major axis is >= ghost_major, or
+ *   - (press only) it would be the ghost_contacts-th simultaneous contact.
+ * The matching release is swallowed too, so nothing is left stuck.
+ *
+ * Tunable at runtime via /sys/module/sec_ts/parameters/ :
+ *   ghost_filter=0   disable the filter
+ *   ghost_major=0    disable the large-blob rule
+ *   ghost_contacts=0 disable the multi-contact rule (2 = stricter)
+ */
+static int ghost_filter = 1;
+module_param(ghost_filter, int, 0644);
+MODULE_PARM_DESC(ghost_filter, "Drop ghost-touch blobs (0=off)");
+static int ghost_major = 60;
+module_param(ghost_major, int, 0644);
+MODULE_PARM_DESC(ghost_major, "Drop pressure-saturated contacts with major >= this (0=off)");
+static int ghost_contacts = 3;
+module_param(ghost_contacts, int, 0644);
+MODULE_PARM_DESC(ghost_contacts, "Drop a pressure-saturated press that makes this many simultaneous contacts (0=off)");
+static unsigned long ghost_mask;
+
+static bool sec_ts_is_ghost(struct sec_ts_data *ts, int t_id, bool press)
+{
+	if (!ghost_filter || ts->coord[t_id].z < 63)
+		return false;
+	if (ghost_major > 0 && ts->coord[t_id].major >= ghost_major)
+		return true;
+	if (press && ghost_contacts > 0 && ts->touch_count + 1 >= ghost_contacts)
+		return true;
+	return false;
+}
+
 #define MAX_EVENT_COUNT 32
 static void sec_ts_read_event(struct sec_ts_data *ts)
 {
@@ -1158,6 +1197,45 @@ static void sec_ts_read_event(struct sec_ts_data *ts)
 
 				if (ts->coord[t_id].z <= 0)
 					ts->coord[t_id].z = 1;
+
+				/* ghost-blob filter: swallow bad contacts and their matching release */
+				if (ts->coord[t_id].action == SEC_TS_COORDINATE_ACTION_RELEASE) {
+					if (test_and_clear_bit(t_id, &ghost_mask)) {
+						ts->coord[t_id].action = SEC_TS_COORDINATE_ACTION_NONE;
+						ts->coord[t_id].mcount = 0;
+						ts->coord[t_id].palm_count = 0;
+						goto ghost_skip;
+					}
+				} else if (test_bit(t_id, &ghost_mask)) {
+					goto ghost_skip;
+				} else if (ts->coord[t_id].action == SEC_TS_COORDINATE_ACTION_PRESS ||
+						ts->coord[t_id].action == SEC_TS_COORDINATE_ACTION_MOVE) {
+					bool press = (ts->coord[t_id].action == SEC_TS_COORDINATE_ACTION_PRESS);
+
+					if (sec_ts_is_ghost(ts, t_id, press)) {
+						set_bit(t_id, &ghost_mask);
+
+						if (!press && (pre_action == SEC_TS_COORDINATE_ACTION_PRESS ||
+								pre_action == SEC_TS_COORDINATE_ACTION_MOVE)) {
+							/* it was already reported as a finger: lift it */
+							input_mt_slot(ts->input_dev, t_id);
+							input_mt_report_slot_state(ts->input_dev, MT_TOOL_FINGER, 0);
+							if (ts->touch_count > 0)
+								ts->touch_count--;
+							if (ts->touch_count == 0) {
+								input_report_key(ts->input_dev, BTN_TOUCH, 0);
+								input_report_key(ts->input_dev, BTN_TOOL_FINGER, 0);
+							}
+						}
+
+						input_info(true, &ts->client->dev,
+								"%s: ghost blob dropped tID:%d z:%d major:%d minor:%d tc:%d\n",
+								__func__, t_id, ts->coord[t_id].z,
+								ts->coord[t_id].major, ts->coord[t_id].minor,
+								ts->touch_count);
+						goto ghost_skip;
+					}
+				}
 
 				if (ts->pressure_setting_mode) {
 					char addr[3] = { 0 };
@@ -1383,6 +1461,7 @@ static void sec_ts_read_event(struct sec_ts_data *ts)
 			} else {
 				input_err(true, &ts->client->dev, "%s: tid(%d) is out of range\n", __func__, t_id);
 			}
+ghost_skip:
 			break;
 
 		case SEC_TS_GESTURE_EVENT:
@@ -2689,6 +2768,8 @@ void sec_ts_locked_release_all_finger(struct sec_ts_data *ts)
 	char location[6] = { 0, };
 
 	mutex_lock(&ts->eventlock);
+
+	ghost_mask = 0;
 
 	for (i = 0; i < MAX_SUPPORT_TOUCH_COUNT; i++) {
 		input_mt_slot(ts->input_dev, i);
