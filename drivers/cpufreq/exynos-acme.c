@@ -309,8 +309,8 @@ static int exynos_cpufreq_driver_init(struct cpufreq_policy *policy)
 	/*
 	 * iowait boost jumps the CPU toward its top frequency whenever a task
 	 * wakes from disk/network waits, which costs heat and battery. Off by
-	 * default; re-enable per policy with
-	 * /sys/devices/system/cpu/cpufreq/policy*/schedutil/iowait_boost_enable
+	 * default; re-enable per policy by writing 1 to the schedutil
+	 * iowait_boost_enable file of each cpufreq policy in sysfs.
 	 */
 	policy->iowait_boost_enable = false;
 	cpumask_copy(policy->cpus, &domain->cpus);
