@@ -1,5 +1,5 @@
 ### AnyKernel3 Ramdisk Mod Script
-## Galaxy S9+ (star2lte / SM-G965x) - Exynos 9810
+## M4Nexus Kernel - Galaxy S9+ (star2lte / SM-G965x) - Exynos 9810
 ## Based on the AnyKernel3 template by osm0sis @ xda-developers
 ##
 ## The core AnyKernel3 files (tools/, META-INF/) are pulled from upstream by
@@ -8,7 +8,7 @@
 ### AnyKernel setup
 # global properties
 properties() { '
-kernel.string=star2lte kernel
+kernel.string=M4Nexus Kernel
 do.devicecheck=1
 do.modules=0
 do.systemless=0
