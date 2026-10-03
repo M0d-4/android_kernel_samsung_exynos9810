@@ -1,4 +1,4 @@
-name: Build star2lte kernel (AnyKernel3)
+name: Build M4Nexus Kernel for star2lte (AnyKernel3)
 
 on:
   workflow_dispatch:
@@ -47,7 +47,7 @@ jobs:
       KMAKE_FLAGS: >-
         O=out ARCH=arm64 CC=clang HOSTCC=gcc HOSTCXX=g++
         CROSS_COMPILE=aarch64-linux-gnu- CLANG_TRIPLE=aarch64-linux-gnu-
-        KBUILD_BUILD_USER=github-actions KBUILD_BUILD_HOST=github
+        KBUILD_BUILD_USER=M4Nexus KBUILD_BUILD_HOST=Kernel
 
     steps:
       - name: Checkout
@@ -111,13 +111,13 @@ jobs:
         run: |
           kver="$(cat out/include/config/kernel.release)"
           stamp="$(date -u +%Y%m%d)"
-          zip_name="star2lte-${kver}-${stamp}-${GITHUB_SHA::7}.zip"
+          zip_name="M4Nexus-Kernel-star2lte-${kver}-${stamp}-${GITHUB_SHA::7}.zip"
 
           git clone --depth=1 --branch "$AK3_REF" "$AK3_REPO" AnyKernel3
           rm -rf AnyKernel3/.git AnyKernel3/.github AnyKernel3/README.md
 
           cp anykernel/anykernel.sh AnyKernel3/anykernel.sh
-          sed -i "s|^kernel.string=.*|kernel.string=star2lte ${kver} (${stamp})|" AnyKernel3/anykernel.sh
+          sed -i "s|^kernel.string=.*|kernel.string=M4Nexus Kernel ${kver} (${stamp})|" AnyKernel3/anykernel.sh
 
           cp out/arch/arm64/boot/Image AnyKernel3/Image
 
@@ -144,5 +144,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "star2lte-${{ github.run_number }}" "$ZIP_NAME" \
-            --title "star2lte build ${{ github.run_number }}" \
+            --title "M4Nexus Kernel star2lte build ${{ github.run_number }}" \
             --notes "Built from ${GITHUB_SHA::7}. Flash in recovery."
