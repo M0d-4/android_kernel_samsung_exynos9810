@@ -974,15 +974,31 @@ MODULE_PARM_DESC(ghost_major, "Drop pressure-saturated contacts with major >= th
 static int ghost_contacts = 3;
 module_param(ghost_contacts, int, 0644);
 MODULE_PARM_DESC(ghost_contacts, "Drop a pressure-saturated press that makes this many simultaneous contacts (0=off)");
+/* stricter limits while High touch sensitivity (glove mode) is enabled */
+static int ghost_major_glove = 40;
+module_param(ghost_major_glove, int, 0644);
+MODULE_PARM_DESC(ghost_major_glove, "ghost_major used while glove mode is on (0=off)");
+static int ghost_contacts_glove = 2;
+module_param(ghost_contacts_glove, int, 0644);
+MODULE_PARM_DESC(ghost_contacts_glove, "ghost_contacts used while glove mode is on (0=off)");
 static unsigned long ghost_mask;
 
 static bool sec_ts_is_ghost(struct sec_ts_data *ts, int t_id, bool press)
 {
+	int major_thr = ghost_major;
+	int contacts_thr = ghost_contacts;
+
 	if (!ghost_filter || ts->coord[t_id].z < 63)
 		return false;
-	if (ghost_major > 0 && ts->coord[t_id].major >= ghost_major)
+
+	if (ts->touch_functions & SEC_TS_BIT_SETFUNC_GLOVE) {
+		major_thr = ghost_major_glove;
+		contacts_thr = ghost_contacts_glove;
+	}
+
+	if (major_thr > 0 && ts->coord[t_id].major >= major_thr)
 		return true;
-	if (press && ghost_contacts > 0 && ts->touch_count + 1 >= ghost_contacts)
+	if (press && contacts_thr > 0 && ts->touch_count + 1 >= contacts_thr)
 		return true;
 	return false;
 }
