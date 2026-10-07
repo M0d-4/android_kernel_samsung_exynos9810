@@ -39,6 +39,14 @@ config CFQ_GROUP_IOSCHED
 	---help---
 	  Enable group IO scheduling in CFQ.
 
+config IOSCHED_ADIOS
+	tristate "ADIOS I/O scheduler"
+	default y
+	---help---
+	  The ADIOS I/O scheduler is an adaptive deadline scheduler
+	  that predicts latency from request size and history,
+	  and dispatches based on per-type deadlines and batch limits.
+
 choice
 	prompt "Default I/O scheduler"
 	default DEFAULT_CFQ
@@ -55,6 +63,8 @@ choice
 	config DEFAULT_NOOP
 		bool "No-op"
 
+	config DEFAULT_ADIOS
+		bool "ADIOS" if IOSCHED_ADIOS=y
 endchoice
 
 config DEFAULT_IOSCHED
@@ -62,6 +72,7 @@ config DEFAULT_IOSCHED
 	default "deadline" if DEFAULT_DEADLINE
 	default "cfq" if DEFAULT_CFQ
 	default "noop" if DEFAULT_NOOP
+	default "adios" if DEFAULT_ADIOS
 
 config MQ_IOSCHED_DEADLINE
 	tristate "MQ deadline I/O scheduler"

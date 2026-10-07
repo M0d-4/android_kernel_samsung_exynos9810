@@ -21,6 +21,7 @@
  */
 
 #include <linux/sched.h>
+#include <linux/sched/bore.h>
 #include <linux/latencytop.h>
 #include <linux/cpumask.h>
 #include <linux/cpuidle.h>
@@ -877,6 +878,13 @@ static void update_curr(struct cfs_rq *cfs_rq)
 	curr->sum_exec_runtime += delta_exec;
 	schedstat_add(cfs_rq->exec_clock, delta_exec);
 
+#ifdef CONFIG_SCHED_BORE
+	if (entity_is_task(curr)) {
+		bore_update(task_of(curr), delta_exec);
+		curr->vruntime += bore_vruntime_delta(task_of(curr),
+					calc_delta_fair(delta_exec, curr));
+	} else
+#endif
 	curr->vruntime += calc_delta_fair(delta_exec, curr);
 	update_min_vruntime(cfs_rq);
 
@@ -1058,6 +1066,9 @@ update_stats_dequeue(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 		if (tsk->state & TASK_UNINTERRUPTIBLE)
 			schedstat_set(se->statistics.block_start,
 				      rq_clock(rq_of(cfs_rq)));
+#ifdef CONFIG_SCHED_BORE
+		bore_sleep(tsk);
+#endif
 	}
 }
 

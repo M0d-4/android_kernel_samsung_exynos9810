@@ -25,7 +25,25 @@ extern unsigned int sysctl_sched_use_walt_cpu_util;
 extern unsigned int sysctl_sched_use_walt_task_util;
 extern unsigned int sysctl_sched_walt_init_task_load_pct;
 extern unsigned int sysctl_sched_walt_cpu_high_irqload;
+
 #endif
+
+#ifdef CONFIG_SCHED_BORE
+extern unsigned int sysctl_sched_bore;
+extern unsigned int sysctl_sched_burst_penalty_offset;
+extern unsigned int sysctl_sched_burst_penalty_scale;
+extern unsigned int sysctl_sched_burst_smoothness;
+extern unsigned int sysctl_sched_burst_inherit_type;
+
+extern int sched_bore_update_handler(struct ctl_table *table, int write,
+				     void __user *buffer, size_t *lenp,
+				     loff_t *ppos);
+extern int sched_burst_inherit_type_update_handler(struct ctl_table *table,
+						   int write,
+						   void __user *buffer,
+						   size_t *lenp, loff_t *ppos);
+
+#endif /* CONFIG_SCHED_BORE */
 
 enum sched_tunable_scaling {
 	SCHED_TUNABLESCALING_NONE,

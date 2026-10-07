@@ -399,6 +399,12 @@ config IRQ_TIME_ACCOUNTING
 
 	  If in doubt, say N here.
 
+config SCHED_BORE
+	bool "BORE burst-oriented CFS scheduler"
+	default y
+	help
+	  BORE 7 burst penalty adapted for CFS 4.9; keeps WALT load tracking.
+
 config SCHED_WALT
 	bool "Support window based load tracking"
 	depends on SMP
