@@ -58,11 +58,11 @@ struct latency_model {
 };
 
 struct adios_rq_data {
+	struct request *rq;
 	struct rb_node rb_node;
 	struct list_head list;
 	u64 deadline;
 	u8 optype;
-	struct request *rq;
 };
 
 struct dl_group {
@@ -181,6 +181,7 @@ static void adios_add_request(struct request_queue *q, struct request *rq)
 
 	rd->optype = optype;
 	rd->deadline = ktime_get_ns() + ad->models[optype].params.latency_target[optype];
+	/* rd->rq stores request pointer; must match rq->elv.priv[0] for container_of consistency */
 	rd->rq = rq;
 	rq->elv.priv[0] = rd;
 
@@ -205,6 +206,7 @@ static int adios_dispatch(struct request_queue *q, int force)
 		if (!list_empty(&ad->dl_groups[optype].rqs)) {
 			struct adios_rq_data *rd = list_first_entry(&ad->dl_groups[optype].rqs,
 					struct adios_rq_data, list);
+			/* rq = rd->rq was set in adios_add_request(); container-of consistency guaranteed */
 			rq = rd->rq;
 			if (ad->batch_count[optype] >= ad->models[optype].params.batch_limit[optype]) {
 				ad->batch_count[optype] = 0;
@@ -225,6 +227,8 @@ static int adios_dispatch(struct request_queue *q, int force)
 
 static void adios_completed_request(struct request_queue *q, struct request *rq)
 {
+	/* rd retrieved via rq->elv.priv[0], set in adios_add_request();
+	 * rd->rq was set to original request there; pointer consistency maintained */
 	struct adios_data *ad = q->elevator->elevator_data;
 	struct adios_rq_data *rd = rq->elv.priv[0];
 	unsigned long flags;
