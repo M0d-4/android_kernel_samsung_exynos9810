@@ -62,6 +62,7 @@ struct adios_rq_data {
 	struct list_head list;
 	u64 deadline;
 	u8 optype;
+	struct request *rq;
 };
 
 struct dl_group {
@@ -180,11 +181,12 @@ static void adios_add_request(struct request_queue *q, struct request *rq)
 
 	rd->optype = optype;
 	rd->deadline = ktime_get_ns() + ad->models[optype].params.latency_target[optype];
+	rd->rq = rq;
+	rq->elv.priv[0] = rd;
 
 	spin_lock_irqsave(&ad->lock, flags);
 	list_add_tail(&rd->list, &ad->dl_groups[optype].rqs);
 	rb_insert_color(&rd->rb_node, &ad->dl_groups[optype].rb_root);
-	rq->elv.priv[0] = rd;
 	spin_unlock_irqrestore(&ad->lock, flags);
 }
 
@@ -203,14 +205,13 @@ static int adios_dispatch(struct request_queue *q, int force)
 		if (!list_empty(&ad->dl_groups[optype].rqs)) {
 			struct adios_rq_data *rd = list_first_entry(&ad->dl_groups[optype].rqs,
 					struct adios_rq_data, list);
-			rq = container_of((void *)rd - offsetof(struct request, elv.priv[0]), struct request, elv.priv[0]);
+			rq = rd->rq;
 			if (ad->batch_count[optype] >= ad->models[optype].params.batch_limit[optype]) {
 				ad->batch_count[optype] = 0;
 				continue;
 			}
 			list_del(&rd->list);
 			rb_erase(&rd->rb_node, &ad->dl_groups[optype].rb_root);
-			rq->elv.priv[0] = NULL;
 			ad->batch_count[optype]++;
 			ad->current_optype = optype;
 			ad->last_dispatch = ktime_get_ns();
