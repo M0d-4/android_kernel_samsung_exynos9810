@@ -57,13 +57,6 @@ struct latency_model {
 	struct latency_model_params params;
 };
 
-struct adios_rq_data {
-	struct rb_node rb_node;
-	struct list_head list;
-	u64 deadline;
-	u8 optype;
-};
-
 struct dl_group {
 	struct rb_root rb_root;
 	struct list_head rqs;
@@ -74,7 +67,6 @@ struct adios_data {
 	struct request_queue *queue;
 	struct latency_model models[ADIOS_OPTYPES];
 	struct dl_group dl_groups[ADIOS_OPTYPES];
-	struct kmem_cache *rq_data_cache;
 	spinlock_t lock;
 	unsigned int batch_count[ADIOS_OPTYPES];
 	unsigned int current_optype;
@@ -121,18 +113,6 @@ static inline u8 adios_optype(struct request *rq)
 	}
 }
 
-static struct kmem_cache *adios_rq_cachep;
-
-static struct adios_rq_data *adios_rq_data_alloc(gfp_t gfp)
-{
-	return kmem_cache_alloc(adios_rq_cachep, gfp);
-}
-
-static void adios_rq_data_free(struct adios_rq_data *rd)
-{
-	kmem_cache_free(adios_rq_cachep, rd);
-}
-
 static __maybe_unused u64 lm_predict_latency(struct latency_model *model, u32 block_size)
 {
 	u8 idx = block_size >> 9;
@@ -171,20 +151,12 @@ static void lm_update_latency(struct latency_model *model, u32 block_size, u64 m
 static void adios_add_request(struct request_queue *q, struct request *rq)
 {
 	struct adios_data *ad = q->elevator->elevator_data;
-	struct adios_rq_data *rd = adios_rq_data_alloc(GFP_ATOMIC);
 	unsigned long flags;
 	u8 optype = adios_optype(rq);
 
-	if (!rd)
-		return;
-
-	rd->optype = optype;
-	rd->deadline = ktime_get_ns() + ad->models[optype].params.latency_target[optype];
-	rq->elv.priv[0] = rd;
-
 	spin_lock_irqsave(&ad->lock, flags);
 	list_add_tail(&rq->queuelist, &ad->dl_groups[optype].rqs);
-	rb_insert_color(&rq->rb_node, &ad->dl_groups[optype].rb_root);
+	elv_rb_add(&ad->dl_groups[optype].rb_root, rq);
 	spin_unlock_irqrestore(&ad->lock, flags);
 }
 
@@ -200,20 +172,21 @@ static int adios_dispatch(struct request_queue *q, int force)
 
 	for (i = 0; i < ADIOS_OPTYPES; i++) {
 		optype = (ad->current_optype + i) % ADIOS_OPTYPES;
-		if (!list_empty(&ad->dl_groups[optype].rqs)) {
-			rq = list_first_entry(&ad->dl_groups[optype].rqs,
-				struct request, queuelist);
-			if (ad->batch_count[optype] >= ad->models[optype].params.batch_limit[optype]) {
-				ad->batch_count[optype] = 0;
-				continue;
-			}
-			list_del(&rq->queuelist);
-			rb_erase(&rq->rb_node, &ad->dl_groups[optype].rb_root);
-			ad->batch_count[optype]++;
-			ad->current_optype = optype;
-			ad->last_dispatch = ktime_get_ns();
-			break;
+		if (list_empty(&ad->dl_groups[optype].rqs))
+			continue;
+		if (!force &&
+		    ad->batch_count[optype] >= ad->models[optype].params.batch_limit[optype]) {
+			ad->batch_count[optype] = 0;
+			continue;
 		}
+		rq = list_first_entry(&ad->dl_groups[optype].rqs,
+			struct request, queuelist);
+		list_del(&rq->queuelist);
+		elv_rb_del(&ad->dl_groups[optype].rb_root, rq);
+		ad->batch_count[optype]++;
+		ad->current_optype = optype;
+		ad->last_dispatch = ktime_get_ns();
+		break;
 	}
 
 	if (rq)
@@ -225,22 +198,16 @@ static int adios_dispatch(struct request_queue *q, int force)
 
 static void adios_completed_request(struct request_queue *q, struct request *rq)
 {
-	/* rd retrieved via rq->elv.priv[0], set in adios_add_request(); */
 	struct adios_data *ad = q->elevator->elevator_data;
-	struct adios_rq_data *rd = rq->elv.priv[0];
 	unsigned long flags;
 	u64 now, latency;
-
-	if (!rd)
-		return;
+	u8 optype = adios_optype(rq);
 
 	now = ktime_get_ns();
 	latency = now > ad->last_dispatch ? now - ad->last_dispatch : 0;
-	lm_update_latency(&ad->models[rd->optype], blk_rq_sectors(rq) << 9, latency);
 
 	spin_lock_irqsave(&ad->lock, flags);
-	adios_rq_data_free(rd);
-	rq->elv.priv[0] = NULL;
+	lm_update_latency(&ad->models[optype], blk_rq_sectors(rq) << 9, latency);
 	spin_unlock_irqrestore(&ad->lock, flags);
 }
 
@@ -248,14 +215,17 @@ static void adios_merged_request(struct request_queue *q, struct request *req, i
 {
 	struct adios_data *ad = q->elevator->elevator_data;
 	unsigned long flags;
+	u8 optype = adios_optype(req);
 
 	/*
 	 * if the merge was a front merge, we need to reposition request
 	 */
 	if (type == ELEVATOR_FRONT_MERGE) {
 		spin_lock_irqsave(&ad->lock, flags);
-		rb_erase(&req->rb_node, &ad->dl_groups[adios_optype(req)].rb_root);
-		rb_insert_color(&req->rb_node, &ad->dl_groups[adios_optype(req)].rb_root);
+		if (!RB_EMPTY_NODE(&req->rb_node)) {
+			elv_rb_del(&ad->dl_groups[optype].rb_root, req);
+			elv_rb_add(&ad->dl_groups[optype].rb_root, req);
+		}
 		spin_unlock_irqrestore(&ad->lock, flags);
 	}
 }
@@ -264,20 +234,17 @@ static void adios_merged_requests(struct request_queue *q, struct request *req,
 				   struct request *next)
 {
 	struct adios_data *ad = q->elevator->elevator_data;
-	struct adios_rq_data *rd;
 	unsigned long flags;
+	u8 optype = adios_optype(next);
 
 	/*
 	 * kill knowledge of next, this one is a goner
 	 */
 	spin_lock_irqsave(&ad->lock, flags);
-	list_del(&next->queuelist);
-	rb_erase(&next->rb_node, &ad->dl_groups[adios_optype(next)].rb_root);
-	rd = next->elv.priv[0];
-	if (rd) {
-		adios_rq_data_free(rd);
-		next->elv.priv[0] = NULL;
-	}
+	if (!list_empty(&next->queuelist))
+		list_del(&next->queuelist);
+	if (!RB_EMPTY_NODE(&next->rb_node))
+		elv_rb_del(&ad->dl_groups[optype].rb_root, next);
 	spin_unlock_irqrestore(&ad->lock, flags);
 }
 
@@ -299,13 +266,6 @@ static int adios_init_queue(struct request_queue *q, struct elevator_type *e)
 
 	ad->queue = q;
 	spin_lock_init(&ad->lock);
-	ad->rq_data_cache = kmem_cache_create("adios_rq", sizeof(struct adios_rq_data),
-					      0, SLAB_HWCACHE_ALIGN, NULL);
-	if (!ad->rq_data_cache) {
-		kfree(ad);
-		kobject_put(&eq->kobj);
-		return -ENOMEM;
-	}
 
 	for (i = 0; i < ADIOS_OPTYPES; i++) {
 		INIT_LIST_HEAD(&ad->dl_groups[i].rqs);
@@ -342,17 +302,12 @@ static void adios_exit_queue(struct elevator_queue *e)
 
 	for (i = 0; i < ADIOS_OPTYPES; i++) {
 		struct request *rq, *tmp;
-		struct adios_rq_data *rd;
 		list_for_each_entry_safe(rq, tmp, &ad->dl_groups[i].rqs, queuelist) {
-			list_del(&rq->queuelist);
-			rd = rq->elv.priv[0];
-			if (rd) {
-				adios_rq_data_free(rd);
-				rq->elv.priv[0] = NULL;
-			}
+			list_del_init(&rq->queuelist);
+			if (!RB_EMPTY_NODE(&rq->rb_node))
+				elv_rb_del(&ad->dl_groups[i].rb_root, rq);
 		}
 	}
-	kmem_cache_destroy(ad->rq_data_cache);
 	kfree(ad);
 }
 
@@ -473,7 +428,10 @@ static struct elv_fs_entry adios_attrs[] = {
 
 static struct elevator_type iosched_adios = {
 	.ops.sq = {
-		.elevator_merge_fn		= elv_merge,
+		/* elevator_merge_fn intentionally NULL: elv_merge() falls back to the
+		 * merge hash + last_merge, which is where back/front merges come from.
+		 * Pointing it at elv_merge() would recurse into itself (elevator.c
+		 * calls elevator_merge_fn from elv_merge()) and blow the stack. */
 		.elevator_merged_fn		= adios_merged_request,
 		.elevator_merge_req_fn	= adios_merged_requests,
 		.elevator_dispatch_fn	= adios_dispatch,
@@ -491,17 +449,12 @@ static struct elevator_type iosched_adios = {
 
 static int __init adios_init(void)
 {
-	adios_rq_cachep = kmem_cache_create("adios_rq", sizeof(struct adios_rq_data),
-					    0, SLAB_HWCACHE_ALIGN, NULL);
-	if (!adios_rq_cachep)
-		return -ENOMEM;
 	return elv_register(&iosched_adios);
 }
 
 static void __exit adios_exit(void)
 {
 	elv_unregister(&iosched_adios);
-	kmem_cache_destroy(adios_rq_cachep);
 }
 
 module_init(adios_init);
