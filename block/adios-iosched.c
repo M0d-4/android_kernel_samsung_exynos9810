@@ -205,7 +205,7 @@ static int adios_dispatch(struct request_queue *q, int force)
 		optype = (ad->current_optype + i) % ADIOS_OPTYPES;
 		if (!list_empty(&ad->dl_groups[optype].rqs)) {
 			struct adios_rq_data *rd = list_first_entry(&ad->dl_groups[optype].rqs,
-					struct adios_rq_data, list);
+				struct adios_rq_data, list);
 			/* rq = rd->rq was set in adios_add_request(); container-of consistency guaranteed */
 			rq = rd->rq;
 			if (ad->batch_count[optype] >= ad->models[optype].params.batch_limit[optype]) {
@@ -220,6 +220,9 @@ static int adios_dispatch(struct request_queue *q, int force)
 			break;
 		}
 	}
+
+	if (rq)
+		elv_dispatch_add_tail(q, rq);
 
 	spin_unlock_irqrestore(&ad->lock, flags);
 	return rq ? 1 : 0;
