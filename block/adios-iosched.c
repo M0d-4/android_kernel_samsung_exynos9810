@@ -264,6 +264,7 @@ static void adios_merged_requests(struct request_queue *q, struct request *req,
 				   struct request *next)
 {
 	struct adios_data *ad = q->elevator->elevator_data;
+	struct adios_rq_data *rd;
 	unsigned long flags;
 
 	/*
@@ -272,7 +273,7 @@ static void adios_merged_requests(struct request_queue *q, struct request *req,
 	spin_lock_irqsave(&ad->lock, flags);
 	list_del(&next->queuelist);
 	rb_erase(&next->rb_node, &ad->dl_groups[adios_optype(next)].rb_root);
-	struct adios_rq_data *rd = next->elv.priv[0];
+	rd = next->elv.priv[0];
 	if (rd) {
 		adios_rq_data_free(rd);
 		next->elv.priv[0] = NULL;
@@ -341,9 +342,10 @@ static void adios_exit_queue(struct elevator_queue *e)
 
 	for (i = 0; i < ADIOS_OPTYPES; i++) {
 		struct request *rq, *tmp;
+		struct adios_rq_data *rd;
 		list_for_each_entry_safe(rq, tmp, &ad->dl_groups[i].rqs, queuelist) {
 			list_del(&rq->queuelist);
-			struct adios_rq_data *rd = rq->elv.priv[0];
+			rd = rq->elv.priv[0];
 			if (rd) {
 				adios_rq_data_free(rd);
 				rq->elv.priv[0] = NULL;
