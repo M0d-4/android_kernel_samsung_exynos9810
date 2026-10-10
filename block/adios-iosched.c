@@ -58,7 +58,6 @@ struct latency_model {
 };
 
 struct adios_rq_data {
-	struct request *rq;
 	struct rb_node rb_node;
 	struct list_head list;
 	u64 deadline;
@@ -181,13 +180,11 @@ static void adios_add_request(struct request_queue *q, struct request *rq)
 
 	rd->optype = optype;
 	rd->deadline = ktime_get_ns() + ad->models[optype].params.latency_target[optype];
-	/* rd->rq stores request pointer; must match rq->elv.priv[0] for container_of consistency */
-	rd->rq = rq;
 	rq->elv.priv[0] = rd;
 
 	spin_lock_irqsave(&ad->lock, flags);
-	list_add_tail(&rd->list, &ad->dl_groups[optype].rqs);
-	rb_insert_color(&rd->rb_node, &ad->dl_groups[optype].rb_root);
+	list_add_tail(&rq->queuelist, &ad->dl_groups[optype].rqs);
+	rb_insert_color(&rq->rb_node, &ad->dl_groups[optype].rb_root);
 	spin_unlock_irqrestore(&ad->lock, flags);
 }
 
@@ -204,16 +201,14 @@ static int adios_dispatch(struct request_queue *q, int force)
 	for (i = 0; i < ADIOS_OPTYPES; i++) {
 		optype = (ad->current_optype + i) % ADIOS_OPTYPES;
 		if (!list_empty(&ad->dl_groups[optype].rqs)) {
-			struct adios_rq_data *rd = list_first_entry(&ad->dl_groups[optype].rqs,
-				struct adios_rq_data, list);
-			/* rq = rd->rq was set in adios_add_request(); container-of consistency guaranteed */
-			rq = rd->rq;
+			rq = list_first_entry(&ad->dl_groups[optype].rqs,
+				struct request, queuelist);
 			if (ad->batch_count[optype] >= ad->models[optype].params.batch_limit[optype]) {
 				ad->batch_count[optype] = 0;
 				continue;
 			}
-			list_del(&rd->list);
-			rb_erase(&rd->rb_node, &ad->dl_groups[optype].rb_root);
+			list_del(&rq->queuelist);
+			rb_erase(&rq->rb_node, &ad->dl_groups[optype].rb_root);
 			ad->batch_count[optype]++;
 			ad->current_optype = optype;
 			ad->last_dispatch = ktime_get_ns();
@@ -230,8 +225,7 @@ static int adios_dispatch(struct request_queue *q, int force)
 
 static void adios_completed_request(struct request_queue *q, struct request *rq)
 {
-	/* rd retrieved via rq->elv.priv[0], set in adios_add_request();
-	 * rd->rq was set to original request there; pointer consistency maintained */
+	/* rd retrieved via rq->elv.priv[0], set in adios_add_request(); */
 	struct adios_data *ad = q->elevator->elevator_data;
 	struct adios_rq_data *rd = rq->elv.priv[0];
 	unsigned long flags;
@@ -247,6 +241,42 @@ static void adios_completed_request(struct request_queue *q, struct request *rq)
 	spin_lock_irqsave(&ad->lock, flags);
 	adios_rq_data_free(rd);
 	rq->elv.priv[0] = NULL;
+	spin_unlock_irqrestore(&ad->lock, flags);
+}
+
+static void adios_merged_request(struct request_queue *q, struct request *req, int type)
+{
+	struct adios_data *ad = q->elevator->elevator_data;
+	unsigned long flags;
+
+	/*
+	 * if the merge was a front merge, we need to reposition request
+	 */
+	if (type == ELEVATOR_FRONT_MERGE) {
+		spin_lock_irqsave(&ad->lock, flags);
+		rb_erase(&req->rb_node, &ad->dl_groups[adios_optype(req)].rb_root);
+		rb_insert_color(&req->rb_node, &ad->dl_groups[adios_optype(req)].rb_root);
+		spin_unlock_irqrestore(&ad->lock, flags);
+	}
+}
+
+static void adios_merged_requests(struct request_queue *q, struct request *req,
+				   struct request *next)
+{
+	struct adios_data *ad = q->elevator->elevator_data;
+	unsigned long flags;
+
+	/*
+	 * kill knowledge of next, this one is a goner
+	 */
+	spin_lock_irqsave(&ad->lock, flags);
+	list_del(&next->queuelist);
+	rb_erase(&next->rb_node, &ad->dl_groups[adios_optype(next)].rb_root);
+	struct adios_rq_data *rd = next->elv.priv[0];
+	if (rd) {
+		adios_rq_data_free(rd);
+		next->elv.priv[0] = NULL;
+	}
 	spin_unlock_irqrestore(&ad->lock, flags);
 }
 
@@ -310,10 +340,14 @@ static void adios_exit_queue(struct elevator_queue *e)
 		return;
 
 	for (i = 0; i < ADIOS_OPTYPES; i++) {
-		struct adios_rq_data *rd, *tmp;
-		list_for_each_entry_safe(rd, tmp, &ad->dl_groups[i].rqs, list) {
-			list_del(&rd->list);
-			adios_rq_data_free(rd);
+		struct request *rq, *tmp;
+		list_for_each_entry_safe(rq, tmp, &ad->dl_groups[i].rqs, queuelist) {
+			list_del(&rq->queuelist);
+			struct adios_rq_data *rd = rq->elv.priv[0];
+			if (rd) {
+				adios_rq_data_free(rd);
+				rq->elv.priv[0] = NULL;
+			}
 		}
 	}
 	kmem_cache_destroy(ad->rq_data_cache);
@@ -437,12 +471,14 @@ static struct elv_fs_entry adios_attrs[] = {
 
 static struct elevator_type iosched_adios = {
 	.ops.sq = {
-		.elevator_merge_req_fn	= elv_merge_requests,
+		.elevator_merge_fn		= elv_merge,
+		.elevator_merged_fn		= adios_merged_request,
+		.elevator_merge_req_fn	= adios_merged_requests,
 		.elevator_dispatch_fn	= adios_dispatch,
 		.elevator_add_req_fn	= adios_add_request,
 		.elevator_completed_req_fn = adios_completed_request,
-		.elevator_init_fn	= adios_init_queue,
-		.elevator_exit_fn	= adios_exit_queue,
+		.elevator_init_fn		= adios_init_queue,
+		.elevator_exit_fn		= adios_exit_queue,
 		.elevator_former_req_fn	= elv_rb_former_request,
 		.elevator_latter_req_fn	= elv_rb_latter_request,
 	},
