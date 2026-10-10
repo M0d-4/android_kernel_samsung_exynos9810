@@ -166,27 +166,44 @@ static int adios_dispatch(struct request_queue *q, int force)
 	struct request *rq = NULL;
 	unsigned long flags;
 	u8 optype;
-	int i;
+	int i, pass;
 
 	spin_lock_irqsave(&ad->lock, flags);
 
-	for (i = 0; i < ADIOS_OPTYPES; i++) {
-		optype = (ad->current_optype + i) % ADIOS_OPTYPES;
-		if (list_empty(&ad->dl_groups[optype].rqs))
-			continue;
-		if (!force &&
-		    ad->batch_count[optype] >= ad->models[optype].params.batch_limit[optype]) {
-			ad->batch_count[optype] = 0;
-			continue;
+	/*
+	 * rq must be picked only after the batch-limit test passes: assigning
+	 * it first and then continuing left a request linked in dl_groups
+	 * while elv_dispatch_add_tail() also put it on q->queue_head,
+	 * corrupting both lists.
+	 *
+	 * Pass 0 honours the per-group batch limit so one hot optype cannot
+	 * starve the others; pass 1 ignores it.  Pass 1 is required because
+	 * returning 0 with requests still queued tells __elv_next_request()
+	 * the queue is empty, and a legacy request_queue is not re-kicked
+	 * from the completion path -- the device would hang with requests
+	 * stranded in dl_groups.  That only bit the busy partitions, which
+	 * hit their batch limit within seconds.
+	 */
+	for (pass = 0; pass < 2 && !rq; pass++) {
+		for (i = 0; i < ADIOS_OPTYPES; i++) {
+			optype = (ad->current_optype + i) % ADIOS_OPTYPES;
+			if (list_empty(&ad->dl_groups[optype].rqs))
+				continue;
+			if (!pass && !force &&
+			    ad->batch_count[optype] >=
+					ad->models[optype].params.batch_limit[optype]) {
+				ad->batch_count[optype] = 0;
+				continue;
+			}
+			rq = list_first_entry(&ad->dl_groups[optype].rqs,
+				struct request, queuelist);
+			list_del(&rq->queuelist);
+			elv_rb_del(&ad->dl_groups[optype].rb_root, rq);
+			ad->batch_count[optype]++;
+			ad->current_optype = optype;
+			ad->last_dispatch = ktime_get_ns();
+			break;
 		}
-		rq = list_first_entry(&ad->dl_groups[optype].rqs,
-			struct request, queuelist);
-		list_del(&rq->queuelist);
-		elv_rb_del(&ad->dl_groups[optype].rb_root, rq);
-		ad->batch_count[optype]++;
-		ad->current_optype = optype;
-		ad->last_dispatch = ktime_get_ns();
-		break;
 	}
 
 	if (rq)
