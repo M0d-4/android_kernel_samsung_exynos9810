@@ -9,7 +9,7 @@
  *
  * Maple uses a first come first serve style algorithm with seperated read/write
  * handling to allow for read biases. By prioritizing reads, simple tasks should
- * improve in performance. Maple also uses msm_drm_notifier hooks to increase
+ * improve in performance. Maple also uses framebuffer blank notifier hooks to increase
  * expirations when power is suspended to decrease workload.
  */
 #include <linux/blkdev.h>
@@ -18,7 +18,8 @@
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/slab.h>
-#include <linux/msm_drm_notify.h>
+#include <linux/fb.h>
+#include <linux/notifier.h>
 
 #define MAPLE_IOSCHED_PATCHLEVEL	(DRM-9)
 
@@ -49,7 +50,7 @@ struct maple_data {
    	int sleep_latency_multiple;
 
 	/* Display state */
-	struct notifier_block msm_drm_notif;
+	struct notifier_block fb_notif;
 	bool display_on;
 };
 
@@ -267,23 +268,22 @@ maple_latter_request(struct request_queue *q, struct request *rq)
 	return list_entry(rq->queuelist.next, struct request, queuelist);
 }
 
-static int msm_drm_notifier_cb(struct notifier_block *nb,
-			       unsigned long event, void *data)
+/* Exynos: track screen state through the standard framebuffer blank notifier */
+static int maple_fb_notifier_cb(struct notifier_block *nb,
+				unsigned long event, void *data)
 {
 	struct maple_data *mdata = container_of(nb, struct maple_data,
-						msm_drm_notif);
-	struct msm_drm_notifier *evdata = data;
-	int blank;
+						fb_notif);
+	struct fb_event *evdata = data;
+	int *blank;
 
-	blank = *(int *)(evdata->data);
-	mdata->display_on=true;
+	if (event != FB_EARLY_EVENT_BLANK || !evdata || !evdata->data)
+		return NOTIFY_DONE;
 
-	if (blank == MSM_DRM_BLANK_UNBLANK)
-		mdata->display_on = true;
-	else
-		mdata->display_on = false;
+	blank = evdata->data;
+	mdata->display_on = (*blank == FB_BLANK_UNBLANK);
 
- 	return 0;
+	return NOTIFY_OK;
 }
 
 static int maple_init_queue(struct request_queue *q, struct elevator_type *e)
@@ -303,9 +303,10 @@ static int maple_init_queue(struct request_queue *q, struct elevator_type *e)
 	}
 	eq->elevator_data = mdata;
 
-	mdata->msm_drm_notif.notifier_call = msm_drm_notifier_cb;
-	mdata->msm_drm_notif.priority = INT_MAX;
-	msm_drm_register_client(&mdata->msm_drm_notif);
+	mdata->display_on = true;
+	mdata->fb_notif.notifier_call = maple_fb_notifier_cb;
+	mdata->fb_notif.priority = INT_MAX;
+	fb_register_client(&mdata->fb_notif);
 
 	/* Initialize fifo lists */
 	INIT_LIST_HEAD(&mdata->fifo_list[SYNC][READ]);
@@ -333,7 +334,7 @@ static void
 maple_exit_queue(struct elevator_queue *e)
 {
 	struct maple_data *mdata = e->elevator_data;
-	msm_drm_unregister_client(&mdata->msm_drm_notif);
+	fb_unregister_client(&mdata->fb_notif);
 
 	/* Free structure */
 	kfree(mdata);
@@ -420,7 +421,7 @@ static struct elv_fs_entry maple_attrs[] = {
 };
 
 static struct elevator_type iosched_maple = {
-	.ops = {
+	.ops.sq = {
 		.elevator_merge_req_fn		= maple_merged_requests,
 		.elevator_dispatch_fn		= maple_dispatch_requests,
 		.elevator_add_req_fn		= maple_add_request,

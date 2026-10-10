@@ -113,7 +113,7 @@ static int anxiety_init_queue(struct request_queue *q, struct elevator_type *e) 
 }
 
 static struct elevator_type elevator_anxiety = {
-	.ops = {
+	.ops.sq = {
 		.elevator_merge_req_fn	= anxiety_merged_requests,
 		.elevator_dispatch_fn		= anxiety_dispatch,
 		.elevator_add_req_fn		= anxiety_add_request,

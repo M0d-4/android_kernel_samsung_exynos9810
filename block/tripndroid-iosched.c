@@ -238,7 +238,7 @@ static void tripndroid_exit_queue(struct elevator_queue *e)
 }
 
 static struct elevator_type iosched_tripndroid = {
-	.ops = {
+	.ops.sq = {
 		.elevator_merge_req_fn		= tripndroid_merged_requests,
 		.elevator_dispatch_fn		= tripndroid_dispatch_requests,
 		.elevator_add_req_fn		= tripndroid_add_request,

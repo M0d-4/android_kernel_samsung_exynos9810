@@ -433,7 +433,7 @@ static struct elv_fs_entry adios_attrs[] = {
 };
 
 static struct elevator_type iosched_adios = {
-	.ops = {
+	.ops.sq = {
 		.elevator_merge_req_fn	= elv_merge_requests,
 		.elevator_dispatch_fn	= adios_dispatch,
 		.elevator_add_req_fn	= adios_add_request,

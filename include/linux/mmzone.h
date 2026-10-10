@@ -261,39 +261,34 @@ struct zone_reclaim_stat {
 	unsigned long		recent_scanned[2];
 };
 
-/* BACKPORT:[Cursor] MGLRU - Structs and Definitions */
 #ifdef CONFIG_LRU_GEN
+#include <linux/jump_label.h>
+
 #define MIN_NR_GENS 2
 #define MAX_NR_GENS 4
 
-#include <linux/jump_label.h>
-
 DECLARE_STATIC_KEY_FALSE(lru_gen_caps);
-static inline bool lru_gen_enabled(void) {
+static inline bool lru_gen_enabled(void)
+{
 	return static_branch_likely(&lru_gen_caps);
 }
 
+/*
+ * Per-lruvec multi-gen state. Reclaim still runs on the stock active/inactive
+ * lists: see mm/lru_gen.c.
+ */
 struct lru_gen_struct {
-	/* the aging increments the youngest generation number */
 	unsigned long max_seq;
-	/* the eviction increments the oldest generation numbers */
 	unsigned long min_seq[2];
-	/* the birth time of each generation in jiffies */
 	unsigned long timestamps[MAX_NR_GENS];
-	/* the multi-gen LRU lists */
-	struct list_head lists[MAX_NR_GENS][2][MAX_NR_ZONES];
-	/* the sizes of the multi-gen LRU lists */
-	unsigned long sizes[MAX_NR_GENS][2][MAX_NR_ZONES];
-	/* to protect the lists */
-	spinlock_t lock;
 };
 
 struct lruvec;
 void lru_gen_init_lruvec(struct lruvec *lruvec);
-
 #else /* !CONFIG_LRU_GEN */
 struct lruvec;
-static inline bool lru_gen_enabled(void) {
+static inline bool lru_gen_enabled(void)
+{
 	return false;
 }
 static inline void lru_gen_init_lruvec(struct lruvec *lruvec)

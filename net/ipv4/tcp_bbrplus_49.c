@@ -365,6 +365,14 @@ static void bbr_set_pacing_rate(struct sock *sk, u32 bw, int gain)
 }
 
 /* Return count of segments we want in the skbs we send, or 0 for default. */
+/* This tree uses the min_tso_segs hook (4.20+ API); the 4.9-era
+ * tso_segs_goal hook no longer exists in struct tcp_congestion_ops.
+ */
+static u32 bbr_min_tso_segs(struct sock *sk)
+{
+	return sk->sk_pacing_rate < (bbr_min_tso_rate >> 3) ? 1 : 2;
+}
+
 static u32 bbr_tso_segs_goal(struct sock *sk)
 {
 	struct bbr *bbr = inet_csk_ca(sk);
@@ -1205,7 +1213,7 @@ static struct tcp_congestion_ops tcp_bbr_cong_ops __read_mostly = {
 	.undo_cwnd	= bbr_undo_cwnd,
 	.cwnd_event	= bbr_cwnd_event,
 	.ssthresh	= bbr_ssthresh,
-	.tso_segs_goal	= bbr_tso_segs_goal,
+	.min_tso_segs	= bbr_min_tso_segs,
 	.get_info	= bbr_get_info,
 	.set_state	= bbr_set_state,
 };
