@@ -1,0 +1,182 @@
+name: Build star2lte (AnyKernel3)
+
+on:
+  push:
+    branches: [ "16" ]
+    paths-ignore:
+      - "**.md"
+      - "Documentation/**"
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Publish a GitHub release"
+        type: boolean
+        default: true
+      prerelease:
+        description: "Mark the release as pre-release"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DEVICE: star2lte
+  DEFCONFIG: exynos9810-star2lte_defconfig
+  KERNEL_NAME: M4Nexus
+  ARCH: arm64
+  CLANG_TRIPLE: aarch64-linux-gnu-
+  CROSS_COMPILE: aarch64-linux-gnu-
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang lld llvm gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            bc bison flex libssl-dev libelf-dev libncurses-dev \
+            device-tree-compiler cpio xz-utils zip unzip python3 ccache git
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ccache-${{ env.DEVICE }}-${{ github.sha }}
+          restore-keys: ccache-${{ env.DEVICE }}-
+
+      - name: Host tool fixes for a 4.9 tree on a modern host
+        run: |
+          # gcc >= 10 defaults to -fno-common: dtc's lexer defines yylloc twice
+          for f in scripts/dtc/dtc-lexer.lex.c_shipped scripts/dtc/dtc-lexer.l; do
+            [ -f "$f" ] && sed -i 's/^YYLTYPE yylloc;/extern YYLTYPE yylloc;/' "$f" || true
+          done
+
+      - name: Configure (star2lte only)
+        run: |
+          export PATH="/usr/lib/ccache:$PATH"
+          MAKE_ARGS="O=out ARCH=${ARCH} CC=clang CLANG_TRIPLE=${CLANG_TRIPLE} CROSS_COMPILE=${CROSS_COMPILE}"
+          echo "MAKE_ARGS=${MAKE_ARGS}" >> "$GITHUB_ENV"
+          make ${MAKE_ARGS} ${DEFCONFIG}
+
+          # Make sure the features this kernel is supposed to ship are really on
+          scripts/config --file out/.config -e SCHED_BORE -e IOSCHED_ADIOS -e NTSYNC -e LRU_GEN -e LRU_GEN_ENABLED -e TCP_CONG_ADVANCED -e TCP_CONG_BBRPLUS -e TCP_CONG_CUBIC
+          make ${MAKE_ARGS} olddefconfig
+
+          for opt in SCHED_BORE IOSCHED_ADIOS NTSYNC LRU_GEN LRU_GEN_ENABLED TCP_CONG_BBRPLUS TCP_CONG_CUBIC; do
+            grep -q "^CONFIG_${opt}=y" out/.config || { echo "::error::CONFIG_${opt} is not enabled"; exit 1; }
+          done
+
+      - name: Build Image
+        run: |
+          export PATH="/usr/lib/ccache:$PATH"
+          make ${MAKE_ARGS} -j"$(nproc)" Image 2>&1 | tee build.log
+          test -f out/arch/arm64/boot/Image
+          test -f out/drivers/misc/ntsync.o || { echo "::error::ntsync.o was not built"; exit 1; }
+          test -f out/kernel/sched/bore.o   || { echo "::error::bore.o was not built"; exit 1; }
+          test -f out/net/ipv4/tcp_bbrplus_49.o || { echo "::error::tcp_bbrplus_49.o was not built"; exit 1; }
+          test -f out/mm/lru_gen.o          || { echo "::error::lru_gen.o was not built"; exit 1; }
+          test -f out/block/adios-iosched.o || { echo "::error::adios-iosched.o was not built"; exit 1; }
+          ccache -s || true
+
+      - name: Package AnyKernel3
+        id: pack
+        run: |
+          set -e
+          SHORT="$(git rev-parse --short HEAD)"
+          DATE="$(date -u +%Y%m%d)"
+          ZIP="${KERNEL_NAME}-${DEVICE}-${DATE}-${SHORT}.zip"
+
+          git clone --depth 1 https://github.com/osm0sis/AnyKernel3 ak3
+          rm -rf ak3/.git ak3/.github ak3/README.md ak3/LICENSE ak3/modules ak3/patch ak3/ramdisk
+
+          cat > ak3/anykernel.sh <<'EOF'
+          ### AnyKernel3 Ramdisk Mod Script
+          properties() { '
+          kernel.string=M4Nexus kernel for Samsung Galaxy S9+ (star2lte)
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=0
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=star2lte
+          device.name2=SM-G965F
+          device.name3=SM-G965N
+          device.name4=SM-G965U
+          device.name5=
+          supported.versions=
+          supported.patchlevels=
+          supported.vendorpatchlevels=
+          '; }
+
+          # boot partition (matched by name, case-insensitive), non A/B
+          BLOCK=boot;
+          IS_SLOT_DEVICE=0;
+          RAMDISK_COMPRESSION=auto;
+          PATCH_VBMETA_FLAG=auto;
+
+          . tools/ak3-core.sh;
+
+          dump_boot;
+          write_boot;
+          EOF
+
+          cp out/arch/arm64/boot/Image ak3/Image
+          (cd ak3 && zip -r9 "../${ZIP}" . -x '*.git*')
+
+          echo "zip=${ZIP}"     >> "$GITHUB_OUTPUT"
+          echo "short=${SHORT}" >> "$GITHUB_OUTPUT"
+          echo "date=${DATE}"   >> "$GITHUB_OUTPUT"
+          sha256sum "${ZIP}" | tee "${ZIP}.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pack.outputs.zip }}
+          path: |
+            ${{ steps.pack.outputs.zip }}
+            ${{ steps.pack.outputs.zip }}.sha256
+            build.log
+
+      - name: Release notes
+        if: github.event_name == 'push' || inputs.release
+        run: |
+          {
+            echo "## ${KERNEL_NAME} for ${DEVICE}"
+            echo
+            echo "- Flash the zip in a custom recovery (AnyKernel3). Galaxy S9+ (SM-G965x) only."
+            echo "- Source: \`${GITHUB_SHA}\`"
+            echo "- Features: BORE scheduler, ADIOS I/O scheduler, NTSYNC, lru_gen sysfs framework (reclaim still uses stock LRU)"
+            echo "- Power/thermal: iowait frequency boost off by default, runtime debug checks off"
+            echo
+            echo "SHA256:"
+            echo '```'
+            cat "${{ steps.pack.outputs.zip }}.sha256"
+            echo '```'
+          } > RELEASE_NOTES.md
+
+      - name: Publish release
+        if: github.event_name == 'push' || inputs.release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.DEVICE }}-${{ steps.pack.outputs.date }}-${{ steps.pack.outputs.short }}
+          name: ${{ env.KERNEL_NAME }} ${{ env.DEVICE }} ${{ steps.pack.outputs.date }} (${{ steps.pack.outputs.short }})
+          body_path: RELEASE_NOTES.md
+          prerelease: ${{ inputs.prerelease || false }}
+          target_commitish: ${{ github.sha }}
+          files: |
+            ${{ steps.pack.outputs.zip }}
+            ${{ steps.pack.outputs.zip }}.sha256
