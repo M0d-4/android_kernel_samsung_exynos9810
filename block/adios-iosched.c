@@ -38,9 +38,23 @@ struct lm_buckets {
 	struct latency_bucket_large large[LM_BUCKETS_LARGE];
 };
 
+struct latency_model_params {
+	u64 latency_target[ADIOS_OPTYPES];
+	u32 batch_limit[ADIOS_OPTYPES];
+	u32 dl_prio[2];
+	u64 global_latency_window;
+	u64 global_latency_window_rotational;
+	u8 bq_refill_below_ratio;
+	u64 lat_model_latency_limit;
+	u32 lm_shrink_at_kreqs;
+	u32 lm_shrink_at_gbytes;
+	u32 lm_shrink_resist;
+	u32 compliance_flags;
+};
+
 struct latency_model {
 	struct lm_buckets buckets;
-	u64 latency_limit;
+	struct latency_model_params params;
 };
 
 struct dl_group {
@@ -57,25 +71,6 @@ struct adios_data {
 	unsigned int batch_count[ADIOS_OPTYPES];
 	unsigned int current_optype;
 	u64 last_dispatch;
-
-	/*
-	 * Scheduler-wide tunables.  Upstream ADIOS keeps these on
-	 * struct adios_data and indexes them by optype; nesting them inside
-	 * the per-optype latency model made the sysfs knobs silently target
-	 * the wrong slot (writing batch_limit_write used to touch
-	 * models[i].params.batch_limit[1] while dispatch read
-	 * models[i].params.batch_limit[i]).
-	 */
-	u64 latency_target[ADIOS_OPTYPES];
-	u32 batch_limit[ADIOS_OPTYPES];
-	u64 global_latency_window;
-	u64 global_latency_window_rotational;
-	s32 dl_prio[2];
-	u8 bq_refill_below_ratio;
-	u32 compliance_flags;
-	u32 lm_shrink_at_kreqs;
-	u32 lm_shrink_at_gbytes;
-	u32 lm_shrink_resist;
 };
 
 static u64 default_latency_target[ADIOS_OPTYPES] = {
@@ -92,7 +87,7 @@ static u32 default_batch_limit[ADIOS_OPTYPES] = {
 	[ADIOS_OTHER] = 8,
 };
 
-static s32 default_dl_prio[2] = { 8, 0 };
+static u32 default_dl_prio[2] = { 8, 0 };
 
 static u64 default_global_latency_window = 16000000ULL;
 static u64 default_global_latency_window_rotational = 22000000ULL;
@@ -118,45 +113,35 @@ static inline u8 adios_optype(struct request *rq)
 	}
 }
 
-static __maybe_unused u64 lm_predict_latency(struct latency_model *model,
-					     u32 block_size)
+static __maybe_unused u64 lm_predict_latency(struct latency_model *model, u32 block_size)
 {
-	u32 idx = block_size >> 9;
-
+	u8 idx = block_size >> 9;
 	if (idx < LM_BUCKETS_SMALL) {
 		struct latency_bucket_small *b = &model->buckets.small[idx];
-
 		if (b->count)
 			return div64_u64(b->sum, b->count);
 	} else if (idx < LM_BUCKETS_SMALL + LM_BUCKETS_LARGE) {
-		struct latency_bucket_large *b =
-			&model->buckets.large[idx - LM_BUCKETS_SMALL];
-
+		struct latency_bucket_large *b = &model->buckets.large[idx - LM_BUCKETS_SMALL];
 		if (b->count)
 			return div64_u64(b->sum, b->count);
 	}
-	return model->latency_limit;
+	return model->params.lat_model_latency_limit;
 }
 
-static void lm_update_latency(struct latency_model *model, u32 block_size,
-			      u64 measured)
+static void lm_update_latency(struct latency_model *model, u32 block_size, u64 measured)
 {
-	u32 idx = block_size >> 9;
-	u64 limit = model->latency_limit;
-
+	u8 idx = block_size >> 9;
+	u64 limit = model->params.lat_model_latency_limit;
 	if (measured > limit)
 		measured = limit;
 
 	if (idx < LM_BUCKETS_SMALL) {
 		struct latency_bucket_small *b = &model->buckets.small[idx];
-
 		b->sum = (b->sum * 7 + measured) / 8;
 		if (b->count < 255)
 			b->count++;
 	} else if (idx < LM_BUCKETS_SMALL + LM_BUCKETS_LARGE) {
-		struct latency_bucket_large *b =
-			&model->buckets.large[idx - LM_BUCKETS_SMALL];
-
+		struct latency_bucket_large *b = &model->buckets.large[idx - LM_BUCKETS_SMALL];
 		b->sum = (b->sum * 7 + measured) / 8;
 		if (b->count < 255)
 			b->count++;
@@ -196,7 +181,8 @@ static int adios_dispatch(struct request_queue *q, int force)
 	 * returning 0 with requests still queued tells __elv_next_request()
 	 * the queue is empty, and a legacy request_queue is not re-kicked
 	 * from the completion path -- the device would hang with requests
-	 * stranded in dl_groups.
+	 * stranded in dl_groups.  That only bit the busy partitions, which
+	 * hit their batch limit within seconds.
 	 */
 	for (pass = 0; pass < 2 && !rq; pass++) {
 		for (i = 0; i < ADIOS_OPTYPES; i++) {
@@ -204,12 +190,13 @@ static int adios_dispatch(struct request_queue *q, int force)
 			if (list_empty(&ad->dl_groups[optype].rqs))
 				continue;
 			if (!pass && !force &&
-			    ad->batch_count[optype] >= ad->batch_limit[optype]) {
+			    ad->batch_count[optype] >=
+					ad->models[optype].params.batch_limit[optype]) {
 				ad->batch_count[optype] = 0;
 				continue;
 			}
 			rq = list_first_entry(&ad->dl_groups[optype].rqs,
-					struct request, queuelist);
+				struct request, queuelist);
 			list_del(&rq->queuelist);
 			elv_rb_del(&ad->dl_groups[optype].rb_root, rq);
 			ad->batch_count[optype]++;
@@ -230,20 +217,18 @@ static void adios_completed_request(struct request_queue *q, struct request *rq)
 {
 	struct adios_data *ad = q->elevator->elevator_data;
 	unsigned long flags;
-	u64 now, last_dispatch;
+	u64 now, latency;
 	u8 optype = adios_optype(rq);
 
 	now = ktime_get_ns();
+	latency = now > ad->last_dispatch ? now - ad->last_dispatch : 0;
 
 	spin_lock_irqsave(&ad->lock, flags);
-	last_dispatch = ad->last_dispatch;
-	lm_update_latency(&ad->models[optype], blk_rq_sectors(rq) << 9,
-			  now > last_dispatch ? now - last_dispatch : 0);
+	lm_update_latency(&ad->models[optype], blk_rq_sectors(rq) << 9, latency);
 	spin_unlock_irqrestore(&ad->lock, flags);
 }
 
-static void adios_merged_request(struct request_queue *q, struct request *req,
-				 int type)
+static void adios_merged_request(struct request_queue *q, struct request *req, int type)
 {
 	struct adios_data *ad = q->elevator->elevator_data;
 	unsigned long flags;
@@ -262,25 +247,16 @@ static void adios_merged_request(struct request_queue *q, struct request *req,
 	}
 }
 
-/*
- * One request has been absorbed into another; 'next' is about to be freed by
- * attempt_merge() -> __blk_put_request(), which does
- * BUG_ON(!list_empty(&req->queuelist)).
- *
- * rq->queuelist is only empty after list_del_init(): a bare list_del() leaves
- * LIST_POISON1/LIST_POISON2 in the entry, list_empty() then answers false and
- * the BUG_ON fires -> kernel panic.  Every other legacy scheduler in this tree
- * (noop, fiops, cfq, deadline, maple) unlinks merged-away requests with
- * list_del_init() or list_move() for exactly this reason; upstream ADIOS'
- * remove_request() does the same.
- */
 static void adios_merged_requests(struct request_queue *q, struct request *req,
-				  struct request *next)
+				   struct request *next)
 {
 	struct adios_data *ad = q->elevator->elevator_data;
 	unsigned long flags;
 	u8 optype = adios_optype(next);
 
+	/*
+	 * kill knowledge of next, this one is a goner
+	 */
 	spin_lock_irqsave(&ad->lock, flags);
 	if (!list_empty(&next->queuelist))
 		list_del_init(&next->queuelist);
@@ -311,24 +287,20 @@ static int adios_init_queue(struct request_queue *q, struct elevator_type *e)
 	for (i = 0; i < ADIOS_OPTYPES; i++) {
 		INIT_LIST_HEAD(&ad->dl_groups[i].rqs);
 		ad->dl_groups[i].rb_root = RB_ROOT;
-		ad->latency_target[i] = default_latency_target[i];
-		ad->batch_limit[i] = default_batch_limit[i];
+		ad->models[i].params.latency_target[i] = default_latency_target[i];
+		ad->models[i].params.batch_limit[i] = default_batch_limit[i];
 		ad->batch_count[i] = 0;
 	}
-
-	ad->dl_prio[0] = default_dl_prio[0];
-	ad->dl_prio[1] = default_dl_prio[1];
-	ad->global_latency_window = default_global_latency_window;
-	ad->global_latency_window_rotational =
-		default_global_latency_window_rotational;
-	ad->bq_refill_below_ratio = default_bq_refill_below_ratio;
-	ad->compliance_flags = default_compliance_flags;
-	ad->lm_shrink_at_kreqs = default_lm_shrink_at_kreqs;
-	ad->lm_shrink_at_gbytes = default_lm_shrink_at_gbytes;
-	ad->lm_shrink_resist = default_lm_shrink_resist;
-
-	for (i = 0; i < ADIOS_OPTYPES; i++)
-		ad->models[i].latency_limit = default_lat_model_latency_limit;
+	ad->models[0].params.dl_prio[0] = default_dl_prio[0];
+	ad->models[0].params.dl_prio[1] = default_dl_prio[1];
+	ad->models[0].params.global_latency_window = default_global_latency_window;
+	ad->models[0].params.global_latency_window_rotational = default_global_latency_window_rotational;
+	ad->models[0].params.bq_refill_below_ratio = default_bq_refill_below_ratio;
+	ad->models[0].params.lat_model_latency_limit = default_lat_model_latency_limit;
+	ad->models[0].params.lm_shrink_at_kreqs = default_lm_shrink_at_kreqs;
+	ad->models[0].params.lm_shrink_at_gbytes = default_lm_shrink_at_gbytes;
+	ad->models[0].params.lm_shrink_resist = default_lm_shrink_resist;
+	ad->models[0].params.compliance_flags = default_compliance_flags;
 
 	eq->elevator_data = ad;
 	spin_lock_irq(q->queue_lock);
@@ -345,17 +317,9 @@ static void adios_exit_queue(struct elevator_queue *e)
 	if (!ad)
 		return;
 
-	/*
-	 * blk_queue_bypass_start() drains the old elevator before the switch,
-	 * so this is only a safety net.  Dropping a request here would leak
-	 * q->nr_sorted and leave REQ_HASHED pointing into the hash table that
-	 * is about to be freed with this elevator_queue.
-	 */
 	for (i = 0; i < ADIOS_OPTYPES; i++) {
 		struct request *rq, *tmp;
-
-		list_for_each_entry_safe(rq, tmp, &ad->dl_groups[i].rqs,
-					 queuelist) {
+		list_for_each_entry_safe(rq, tmp, &ad->dl_groups[i].rqs, queuelist) {
 			list_del_init(&rq->queuelist);
 			if (!RB_EMPTY_NODE(&rq->rb_node))
 				elv_rb_del(&ad->dl_groups[i].rb_root, rq);
@@ -364,110 +328,109 @@ static void adios_exit_queue(struct elevator_queue *e)
 	kfree(ad);
 }
 
-static ssize_t adios_global_latency_window_show(struct elevator_queue *e,
-						char *page)
+static ssize_t adios_global_latency_window_show(struct elevator_queue *e, char *page)
 {
 	struct adios_data *ad = e->elevator_data;
-
-	return sprintf(page, "%llu\n",
-		       (unsigned long long)ad->global_latency_window);
+	return sprintf(page, "%llu\n", (unsigned long long)ad->models[0].params.global_latency_window);
 }
 
-static ssize_t adios_global_latency_window_store(struct elevator_queue *e,
-						 const char *page, size_t count)
+static ssize_t adios_global_latency_window_store(struct elevator_queue *e, const char *page, size_t count)
 {
 	struct adios_data *ad = e->elevator_data;
 	unsigned long long val;
+	int i;
 
 	if (sscanf(page, "%llu", &val) != 1)
 		return -EINVAL;
-	ad->global_latency_window = val;
+	ad->models[0].params.global_latency_window = val;
+	for (i = 1; i < ADIOS_OPTYPES; i++)
+		ad->models[i].params.global_latency_window = val;
 	return count;
 }
 
-static ssize_t adios_latency_target_read_show(struct elevator_queue *e,
-					      char *page)
+static ssize_t adios_latency_target_read_show(struct elevator_queue *e, char *page)
 {
 	struct adios_data *ad = e->elevator_data;
-
-	return sprintf(page, "%llu\n",
-		       (unsigned long long)ad->latency_target[ADIOS_READ]);
+	return sprintf(page, "%llu\n", (unsigned long long)ad->models[0].params.latency_target[0]);
 }
 
-static ssize_t adios_latency_target_read_store(struct elevator_queue *e,
-					       const char *page, size_t count)
+static ssize_t adios_latency_target_read_store(struct elevator_queue *e, const char *page, size_t count)
 {
 	struct adios_data *ad = e->elevator_data;
 	unsigned long long val;
+	int i;
 
 	if (sscanf(page, "%llu", &val) != 1)
 		return -EINVAL;
-	ad->latency_target[ADIOS_READ] = val;
+	ad->models[0].params.latency_target[0] = val;
+	for (i = 1; i < ADIOS_OPTYPES; i++)
+		ad->models[i].params.latency_target[0] = val;
 	return count;
 }
 
-static ssize_t adios_latency_target_write_show(struct elevator_queue *e,
-					       char *page)
+static ssize_t adios_latency_target_write_show(struct elevator_queue *e, char *page)
 {
 	struct adios_data *ad = e->elevator_data;
-
-	return sprintf(page, "%llu\n",
-		       (unsigned long long)ad->latency_target[ADIOS_WRITE]);
+	return sprintf(page, "%llu\n", (unsigned long long)ad->models[0].params.latency_target[1]);
 }
 
-static ssize_t adios_latency_target_write_store(struct elevator_queue *e,
-						const char *page, size_t count)
+static ssize_t adios_latency_target_write_store(struct elevator_queue *e, const char *page, size_t count)
 {
 	struct adios_data *ad = e->elevator_data;
 	unsigned long long val;
+	int i;
 
 	if (sscanf(page, "%llu", &val) != 1)
 		return -EINVAL;
-	ad->latency_target[ADIOS_WRITE] = val;
+	ad->models[0].params.latency_target[1] = val;
+	for (i = 1; i < ADIOS_OPTYPES; i++)
+		ad->models[i].params.latency_target[1] = val;
 	return count;
 }
 
 static ssize_t adios_batch_limit_read_show(struct elevator_queue *e, char *page)
 {
 	struct adios_data *ad = e->elevator_data;
-
-	return sprintf(page, "%u\n", ad->batch_limit[ADIOS_READ]);
+	return sprintf(page, "%u\n", ad->models[0].params.batch_limit[0]);
 }
 
-static ssize_t adios_batch_limit_read_store(struct elevator_queue *e,
-					    const char *page, size_t count)
+static ssize_t adios_batch_limit_read_store(struct elevator_queue *e, const char *page, size_t count)
 {
 	struct adios_data *ad = e->elevator_data;
 	unsigned long val;
+	int i;
 
-	if (sscanf(page, "%lu", &val) != 1 || !val || val > MAX_BATCH_LIMIT)
+	if (sscanf(page, "%lu", &val) != 1)
 		return -EINVAL;
-	ad->batch_limit[ADIOS_READ] = val;
+	ad->models[0].params.batch_limit[0] = val;
+	for (i = 1; i < ADIOS_OPTYPES; i++)
+		ad->models[i].params.batch_limit[0] = val;
 	return count;
 }
 
 static ssize_t adios_batch_limit_write_show(struct elevator_queue *e, char *page)
 {
 	struct adios_data *ad = e->elevator_data;
-
-	return sprintf(page, "%u\n", ad->batch_limit[ADIOS_WRITE]);
+	return sprintf(page, "%u\n", ad->models[0].params.batch_limit[1]);
 }
 
-static ssize_t adios_batch_limit_write_store(struct elevator_queue *e,
-					     const char *page, size_t count)
+static ssize_t adios_batch_limit_write_store(struct elevator_queue *e, const char *page, size_t count)
 {
 	struct adios_data *ad = e->elevator_data;
 	unsigned long val;
+	int i;
 
-	if (sscanf(page, "%lu", &val) != 1 || !val || val > MAX_BATCH_LIMIT)
+	if (sscanf(page, "%lu", &val) != 1)
 		return -EINVAL;
-	ad->batch_limit[ADIOS_WRITE] = val;
+	ad->models[0].params.batch_limit[1] = val;
+	for (i = 1; i < ADIOS_OPTYPES; i++)
+		ad->models[i].params.batch_limit[1] = val;
 	return count;
 }
 
 static ssize_t adios_version_show(struct elevator_queue *e, char *page)
 {
-	return sprintf(page, "3.3.0-4.9-port-r2\n");
+	return sprintf(page, "3.3.0-4.9-port\n");
 }
 
 static struct elv_fs_entry adios_attrs[] = {
@@ -489,7 +452,7 @@ static struct elevator_type iosched_adios = {
 		.elevator_merged_fn		= adios_merged_request,
 		.elevator_merge_req_fn	= adios_merged_requests,
 		.elevator_dispatch_fn	= adios_dispatch,
-		.elevator_add_req_fn		= adios_add_request,
+		.elevator_add_req_fn	= adios_add_request,
 		.elevator_completed_req_fn = adios_completed_request,
 		.elevator_init_fn		= adios_init_queue,
 		.elevator_exit_fn		= adios_exit_queue,
