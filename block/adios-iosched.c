@@ -228,7 +228,7 @@ static void adios_completed_request(struct request_queue *q, struct request *rq)
 	spin_unlock_irqrestore(&ad->lock, flags);
 }
 
-static void adios_merged_request(struct request_queue *q, struct request *req, int type)
+static void adios_merged_request(struct request_queue *q, struct request *req, enum elv_merge type)
 {
 	struct adios_data *ad = q->elevator->elevator_data;
 	unsigned long flags;
