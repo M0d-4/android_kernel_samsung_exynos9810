@@ -2568,7 +2568,7 @@ static void lru_gen_exit_fault(void)
 	current->in_lru_fault = false;
 }
 
-static void lru_gen_swap_refault(struct page *page, swp_entry_t entry)
+static void __maybe_unused lru_gen_swap_refault(struct page *page, swp_entry_t entry)
 {
 	/* swap cache shadow entries are not tracked in this tree */
 }
@@ -2581,7 +2581,7 @@ static void lru_gen_exit_fault(void)
 {
 }
 
-static void lru_gen_swap_refault(struct page *page, swp_entry_t entry)
+static void __maybe_unused lru_gen_swap_refault(struct page *page, swp_entry_t entry)
 {
 }
 #endif /* CONFIG_LRU_GEN */

@@ -4003,10 +4003,10 @@ static bool age_lruvec(struct lruvec *lruvec, struct scan_control *sc,
 	long nr_to_scan;
 	int swappiness = get_swappiness(lruvec, sc);
 	struct mem_cgroup *memcg = lruvec_memcg(lruvec);
-
-	mem_cgroup_calculate_protection(NULL, memcg);
 	DEFINE_MAX_SEQ(lruvec);
 	DEFINE_MIN_SEQ(lruvec);
+
+	mem_cgroup_calculate_protection(NULL, memcg);
 
 	if (min_ttl) {
 		int gen = lru_gen_from_seq(min_seq[LRU_GEN_FILE]);
@@ -5685,9 +5685,6 @@ retry:
 		 * that's undesirable in laptop mode, where we *want* lumpy
 		 * writeout.  So in laptop mode, write out the whole world.
 		 */
-	if (lru_gen_enabled())
-		return;
-
 		writeback_threshold = sc->nr_to_reclaim + sc->nr_to_reclaim / 2;
 		if (total_scanned > writeback_threshold) {
 			wakeup_flusher_threads(laptop_mode ? 0 : total_scanned,
