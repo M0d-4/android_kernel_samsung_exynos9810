@@ -1,11 +1,6 @@
-name: Build star2lte (AnyKernel3)
+name: Build star2lte (AnyKernel3, manual)
 
 on:
-  push:
-    branches: [ "16" ]
-    paths-ignore:
-      - "**.md"
-      - "Documentation/**"
   workflow_dispatch:
     inputs:
       release:
@@ -32,6 +27,10 @@ env:
   CLANG_TRIPLE: aarch64-linux-gnu-
   CROSS_COMPILE: aarch64-linux-gnu-
   CCACHE_DIR: ${{ github.workspace }}/.ccache
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
   build:
@@ -80,7 +79,7 @@ jobs:
             grep -q "^CONFIG_${opt}=y" out/.config || { echo "::error::CONFIG_${opt} is not enabled"; exit 1; }
           done
 
-      - name: Build Image
+      - name: Build Image (kernel only, no dtb/dtbo)
         run: |
           export PATH="/usr/lib/ccache:$PATH"
           make ${MAKE_ARGS} -j"$(nproc)" Image 2>&1 | tee build.log
@@ -152,7 +151,7 @@ jobs:
             build.log
 
       - name: Release notes
-        if: github.event_name == 'push' || inputs.release
+        if: inputs.release
         run: |
           {
             echo "## ${KERNEL_NAME} for ${DEVICE}"
@@ -169,7 +168,7 @@ jobs:
           } > RELEASE_NOTES.md
 
       - name: Publish release
-        if: github.event_name == 'push' || inputs.release
+        if: inputs.release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.DEVICE }}-${{ steps.pack.outputs.date }}-${{ steps.pack.outputs.short }}

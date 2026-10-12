@@ -380,6 +380,19 @@ static u32 bbr_tso_segs_goal(struct sock *sk)
 	return bbr->tso_segs_goal;
 }
 
+/* tcp_tso_autosize() is static in tcp_output.c in this tree: local copy. */
+static u32 bbr_tso_autosize(const struct sock *sk, unsigned int mss_now,
+			    int min_tso_segs)
+{
+	u32 bytes, segs;
+
+	bytes = min_t(u32, sk->sk_pacing_rate >> 10,
+		      sk->sk_gso_max_size - 1 - MAX_TCP_HEADER);
+	segs = max_t(u32, bytes / mss_now, min_tso_segs);
+
+	return segs;
+}
+
 static void bbr_set_tso_segs_goal(struct sock *sk)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
@@ -387,7 +400,7 @@ static void bbr_set_tso_segs_goal(struct sock *sk)
 	u32 min_segs;
 
 	min_segs = sk->sk_pacing_rate < (bbr_min_tso_rate >> 3) ? 1 : 2;
-	bbr->tso_segs_goal = min(tcp_tso_autosize(sk, tp->mss_cache, min_segs),
+	bbr->tso_segs_goal = min_t(u32, bbr_tso_autosize(sk, tp->mss_cache, min_segs),
 				 0x7FU);
 }
 
@@ -1238,4 +1251,3 @@ MODULE_AUTHOR("Yuchung Cheng <ycheng@google.com>");
 MODULE_AUTHOR("Soheil Hassas Yeganeh <soheil@google.com>");
 MODULE_LICENSE("Dual BSD/GPL");
 MODULE_DESCRIPTION("TCP BBR (Bottleneck Bandwidth and RTT)");
-
