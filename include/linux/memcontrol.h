@@ -270,6 +270,11 @@ struct mem_cgroup {
 	struct list_head event_list;
 	spinlock_t event_list_lock;
 
+#ifdef CONFIG_LRU_GEN
+	/* per-memcg mm_struct list */
+	struct lru_gen_mm_list mm_list;
+#endif
+
 	struct mem_cgroup_per_node *nodeinfo[0];
 	/* WARNING: nodeinfo must be the last member here */
 };
@@ -433,6 +438,17 @@ out:
 	return lruvec;
 }
 
+static inline struct mem_cgroup *lruvec_memcg(struct lruvec *lruvec)
+{
+	struct mem_cgroup_per_node *mz;
+
+	if (mem_cgroup_disabled())
+		return NULL;
+
+	mz = container_of(lruvec, struct mem_cgroup_per_node, lruvec);
+	return mz->memcg;
+}
+
 struct lruvec *mem_cgroup_page_lruvec(struct page *, struct pglist_data *);
 
 bool task_in_mem_cgroup(struct task_struct *task, struct mem_cgroup *memcg);
@@ -508,6 +524,23 @@ static inline bool mem_cgroup_online(struct mem_cgroup *memcg)
 	if (mem_cgroup_disabled())
 		return true;
 	return !!(memcg->css.flags & CSS_ONLINE);
+}
+
+/* try to stablize page_memcg() for all the pages in a memcg */
+static inline bool mem_cgroup_trylock_pages(struct mem_cgroup *memcg)
+{
+	rcu_read_lock();
+
+	if (mem_cgroup_disabled() || !atomic_read(&memcg->moving_account))
+		return true;
+
+	rcu_read_unlock();
+	return false;
+}
+
+static inline void mem_cgroup_unlock_pages(void)
+{
+	rcu_read_unlock();
 }
 
 /*
@@ -747,6 +780,11 @@ static inline struct lruvec *mem_cgroup_lruvec(struct pglist_data *pgdat,
 	return node_lruvec(pgdat);
 }
 
+static inline struct mem_cgroup *lruvec_memcg(struct lruvec *lruvec)
+{
+	return NULL;
+}
+
 static inline struct lruvec *mem_cgroup_page_lruvec(struct page *page,
 						    struct pglist_data *pgdat)
 {
@@ -846,6 +884,18 @@ static inline void __unlock_page_memcg(struct mem_cgroup *memcg)
 
 static inline void unlock_page_memcg(struct page *page)
 {
+}
+
+static inline bool mem_cgroup_trylock_pages(struct mem_cgroup *memcg)
+{
+	/* to match page_memcg_rcu() */
+	rcu_read_lock();
+	return true;
+}
+
+static inline void mem_cgroup_unlock_pages(void)
+{
+	rcu_read_unlock();
 }
 
 static inline void mem_cgroup_handle_over_high(void)
@@ -1041,5 +1091,18 @@ static inline void memcg_kmem_update_page_stat(struct page *page,
 {
 }
 #endif /* CONFIG_MEMCG && !CONFIG_SLOB */
+
+/* per-memcg event counters are not kept in this tree; only global events */
+static inline void __count_memcg_events(struct mem_cgroup *memcg,
+					enum vm_event_item idx,
+					unsigned long count)
+{
+}
+
+/* per-memcg node stats are not kept in this tree; account at node level */
+#define __mod_lruvec_state(lruvec, idx, val) \
+	__mod_node_page_state(lruvec_pgdat(lruvec), (idx), (val))
+#define mod_lruvec_state(lruvec, idx, val) \
+	mod_node_page_state(lruvec_pgdat(lruvec), (idx), (val))
 
 #endif /* _LINUX_MEMCONTROL_H */

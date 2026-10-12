@@ -72,7 +72,7 @@ static int __isolate_cma_pinpage(struct page *page)
 		return -EBUSY;
 	} else {
 		lruvec = mem_cgroup_page_lruvec(page, zone->zone_pgdat);
-		del_page_from_lru_list(page, lruvec, page_lru(page));
+		del_page_from_lru_list(page, lruvec);
 	}
 	spin_unlock_irq(zone_lru_lock(zone));
 

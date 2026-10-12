@@ -14,6 +14,8 @@
 #include <linux/page-flags-layout.h>
 #include <linux/workqueue.h>
 #include <asm/page.h>
+#include <linux/nodemask.h>
+#include <linux/mmdebug.h>
 #include <asm/mmu.h>
 
 #ifndef AT_VECTOR_SIZE_ARCH
@@ -517,6 +519,23 @@ struct mm_struct {
 #endif
 	struct user_namespace *user_ns;
 
+#ifdef CONFIG_LRU_GEN
+		struct {
+			/* this mm_struct is on lru_gen_mm_list */
+			struct list_head list;
+#ifdef CONFIG_MEMCG
+			/* points to the memcg of "owner" above */
+			struct mem_cgroup *memcg;
+#endif
+			/*
+			 * Set when switching to this mm_struct, as a hint of
+			 * whether it has been used since the last time per-node
+			 * page table walkers cleared the corresponding bits.
+			 */
+			nodemask_t nodes;
+		} lru_gen;
+#endif /* CONFIG_LRU_GEN */
+
 	/* store ref to file /proc/<pid>/exe symlink points to */
 	struct file __rcu *exe_file;
 #ifdef CONFIG_MMU_NOTIFIER
@@ -542,6 +561,7 @@ struct mm_struct {
 	/* numa_scan_seq prevents two threads setting pte_numa */
 	int numa_scan_seq;
 #endif
+
 #if defined(CONFIG_NUMA_BALANCING) || defined(CONFIG_COMPACTION)
 	/*
 	 * An operation with batched TLB flushing is going on. Anything that
@@ -564,6 +584,52 @@ struct mm_struct {
 #endif
 	struct work_struct async_put_work;
 };
+
+#ifdef CONFIG_LRU_GEN
+
+struct lru_gen_mm_list {
+	/* mm_struct list for page table walkers */
+	struct list_head fifo;
+	/* protects the list above */
+	spinlock_t lock;
+};
+
+void lru_gen_add_mm(struct mm_struct *mm);
+void lru_gen_del_mm(struct mm_struct *mm);
+#ifdef CONFIG_MEMCG
+void lru_gen_migrate_mm(struct mm_struct *mm);
+#endif
+
+static inline void lru_gen_init_mm(struct mm_struct *mm)
+{
+	INIT_LIST_HEAD(&mm->lru_gen.list);
+#ifdef CONFIG_MEMCG
+	mm->lru_gen.memcg = NULL;
+#endif
+	nodes_clear(mm->lru_gen.nodes);
+}
+
+#else /* !CONFIG_LRU_GEN */
+
+static inline void lru_gen_add_mm(struct mm_struct *mm)
+{
+}
+
+static inline void lru_gen_del_mm(struct mm_struct *mm)
+{
+}
+
+#ifdef CONFIG_MEMCG
+static inline void lru_gen_migrate_mm(struct mm_struct *mm)
+{
+}
+#endif
+
+static inline void lru_gen_init_mm(struct mm_struct *mm)
+{
+}
+
+#endif /* CONFIG_LRU_GEN */
 
 static inline void mm_init_cpumask(struct mm_struct *mm)
 {

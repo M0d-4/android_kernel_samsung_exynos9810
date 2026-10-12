@@ -851,6 +851,8 @@ static inline void get_page(struct page *page)
 
 	if (unlikely(is_zone_device_page(page)))
 		get_zone_device_page(page);
+#define LRU_GEN_PGOFF		(LAST_CPUPID_PGOFF - LRU_GEN_WIDTH)
+#define LRU_REFS_PGOFF		(LRU_GEN_PGOFF - LRU_REFS_WIDTH)
 }
 
 static inline __must_check bool try_get_page(struct page *page)
@@ -1311,6 +1313,8 @@ static inline bool mmget_still_valid(struct mm_struct *mm)
  * (see the comment on walk_page_range() for more details)
  */
 struct mm_walk {
+	int (*pgd_entry)(pgd_t *pgd, unsigned long addr,
+			 unsigned long next, struct mm_walk *walk);
 	int (*pmd_entry)(pmd_t *pmd, unsigned long addr,
 			 unsigned long next, struct mm_walk *walk);
 	int (*pte_entry)(pte_t *pte, unsigned long addr,

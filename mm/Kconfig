@@ -794,21 +794,6 @@ config BALANCE_ANON_FILE_RECLAIM
 	  Swapping anonymous pages out to memory can be efficient enough to justify
 	  treating anonymous and file backed pages equally.
 
-config LRU_GEN
-	bool "Multi-Gen LRU (framework only)"
-	depends on MMU
-	help
-	  Multi-Gen LRU state, sysfs interface (/sys/kernel/mm/lru_gen) and
-	  static key. Page reclaim currently still uses the stock LRU lists;
-	  the generation-based aging/eviction of the upstream implementation
-	  is not backported to 4.9 yet.
-
-config LRU_GEN_ENABLED
-	bool "Enable by default"
-	depends on LRU_GEN
-	help
-	  Turn the lru_gen switch on at boot.
-
 config MMAP_READAROUND_LIMIT
 	int "Limit mmap readaround upperbound"
 	default 0
@@ -841,3 +826,29 @@ config VM_MAX_READAHEAD
 	  This sets the VM_MAX_READAHEAD value to allow the readahead window
 	  to grow to a maximum size of configured. This will benefit sequential
 	  read throughput and thus early boot performance.
+# multi-gen LRU {
+config LRU_GEN
+	bool "Multi-Gen LRU"
+	depends on MMU
+	# the following options can use up the spare bits in page flags
+	depends on !MAXSMP && (64BIT || !SPARSEMEM || SPARSEMEM_VMEMMAP)
+	help
+	  A high performance LRU implementation to overcommit memory. See
+	  Documentation/admin-guide/mm/multigen_lru.rst for details.
+
+config LRU_GEN_ENABLED
+	bool "Enable by default"
+	depends on LRU_GEN
+	help
+	  This option enables the multi-gen LRU by default.
+
+config LRU_GEN_STATS
+	bool "Full stats for debugging"
+	depends on LRU_GEN
+	help
+	  Do not enable this option unless you plan to look at historical stats
+	  from evicted generations for debugging purpose.
+
+	  This option has a per-memcg and per-node memory overhead.
+# }
+

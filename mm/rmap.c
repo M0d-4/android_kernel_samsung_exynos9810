@@ -65,6 +65,7 @@
 #include <asm/tlbflush.h>
 
 #include <trace/events/tlb.h>
+#include <linux/mm_inline.h>
 
 #include "internal.h"
 

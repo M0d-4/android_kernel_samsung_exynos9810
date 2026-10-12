@@ -93,6 +93,7 @@ void lruvec_init(struct lruvec *lruvec)
 
 	for_each_lru(lru)
 		INIT_LIST_HEAD(&lruvec->lists[lru]);
+
 	lru_gen_init_lruvec(lruvec);
 }
 

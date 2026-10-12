@@ -11,6 +11,9 @@
 #include <linux/moduleparam.h>
 #include <linux/oom.h>
 #include <linux/ratelimit.h>
+#include <linux/sched.h>
+#include <linux/signal.h>
+#include <linux/sizes.h>
 #include <linux/sort.h>
 #include <linux/vmpressure.h>
 
