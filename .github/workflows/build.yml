@@ -72,10 +72,10 @@ jobs:
           make ${MAKE_ARGS} ${DEFCONFIG}
 
           # Make sure the features this kernel is supposed to ship are really on
-          scripts/config --file out/.config -e SCHED_BORE -e IOSCHED_ADIOS -e NTSYNC -e LRU_GEN -e LRU_GEN_ENABLED -e TCP_CONG_ADVANCED -e TCP_CONG_BBRPLUS -e TCP_CONG_CUBIC -e ANDROID_SIMPLE_LMK
+          scripts/config --file out/.config -e SCHED_BORE -e IOSCHED_ADIOS -e NTSYNC -e LRU_GEN -e LRU_GEN_ENABLED -e CRYPTO_LZ4 -e TCP_CONG_ADVANCED -e TCP_CONG_BBRPLUS -e TCP_CONG_CUBIC -e ANDROID_SIMPLE_LMK
           make ${MAKE_ARGS} olddefconfig
 
-          for opt in SCHED_BORE IOSCHED_ADIOS NTSYNC LRU_GEN LRU_GEN_ENABLED TCP_CONG_BBRPLUS TCP_CONG_CUBIC ANDROID_SIMPLE_LMK; do
+          for opt in SCHED_BORE IOSCHED_ADIOS NTSYNC LRU_GEN LRU_GEN_ENABLED CRYPTO_LZ4 TCP_CONG_BBRPLUS TCP_CONG_CUBIC ANDROID_SIMPLE_LMK; do
             grep -q "^CONFIG_${opt}=y" out/.config || { echo "::error::CONFIG_${opt} is not enabled"; exit 1; }
           done
 
@@ -95,9 +95,8 @@ jobs:
         id: pack
         run: |
           set -e
-          SHORT="$(git rev-parse --short HEAD)"
           DATE="$(date -u +%Y%m%d)"
-          ZIP="${KERNEL_NAME}-${DEVICE}-${DATE}-${SHORT}.zip"
+          ZIP="${KERNEL_NAME}-${DEVICE}-${DATE}.zip"
 
           git clone --depth 1 https://github.com/osm0sis/AnyKernel3 ak3
           rm -rf ak3/.git ak3/.github ak3/README.md ak3/LICENSE ak3/modules ak3/patch ak3/ramdisk
@@ -137,7 +136,6 @@ jobs:
           (cd ak3 && zip -r9 "../${ZIP}" . -x '*.git*')
 
           echo "zip=${ZIP}"     >> "$GITHUB_OUTPUT"
-          echo "short=${SHORT}" >> "$GITHUB_OUTPUT"
           echo "date=${DATE}"   >> "$GITHUB_OUTPUT"
           sha256sum "${ZIP}" | tee "${ZIP}.sha256"
 
@@ -158,7 +156,7 @@ jobs:
             echo
             echo "- Flash the zip in a custom recovery (AnyKernel3). Galaxy S9+ (SM-G965x) only."
             echo "- Source: \`${GITHUB_SHA}\`"
-            echo "- Features: Simple LMK, BORE scheduler, ADIOS I/O scheduler, NTSYNC, multi-gen LRU (on by default)"
+            echo "- Features: Simple LMK, BORE scheduler, ADIOS I/O scheduler, NTSYNC, multi-gen LRU (on by default), LZ4"
             echo "- Power/thermal: iowait frequency boost off by default, runtime debug checks off"
             echo
             echo "SHA256:"
@@ -171,8 +169,8 @@ jobs:
         if: inputs.release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ env.DEVICE }}-${{ steps.pack.outputs.date }}-${{ steps.pack.outputs.short }}
-          name: ${{ env.KERNEL_NAME }} ${{ env.DEVICE }} ${{ steps.pack.outputs.date }} (${{ steps.pack.outputs.short }})
+          tag_name: ${{ env.DEVICE }}-${{ steps.pack.outputs.date }}-${{ github.run_number }}
+          name: ${{ env.KERNEL_NAME }} ${{ env.DEVICE }} ${{ steps.pack.outputs.date }}
           body_path: RELEASE_NOTES.md
           prerelease: ${{ inputs.prerelease || false }}
           target_commitish: ${{ github.sha }}

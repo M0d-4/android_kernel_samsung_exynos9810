@@ -4216,6 +4216,8 @@ static int alloc_mem_cgroup_per_node_info(struct mem_cgroup *memcg, int node)
 		return 1;
 
 	lruvec_init(&pn->lruvec);
+	/* lruvec_pgdat() is read by MGLRU before mem_cgroup_lruvec() fills it in */
+	pn->lruvec.pgdat = NODE_DATA(node);
 	pn->usage_in_excess = 0;
 	pn->on_tree = false;
 	pn->memcg = memcg;

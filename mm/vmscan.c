@@ -4467,7 +4467,8 @@ static long get_nr_to_scan(struct lruvec *lruvec, struct scan_control *sc, bool 
 	return min_seq[!can_swap] + MIN_NR_GENS <= max_seq ? nr_to_scan : 0;
 }
 
-static void lru_gen_shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc)
+/* Returns the number of pages MGLRU scanned for this lruvec. */
+static unsigned long lru_gen_shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc)
 {
 	struct blk_plug plug;
 	long scanned = 0;
@@ -4520,6 +4521,8 @@ done:
 		current->reclaim_state->mm_walk = NULL;
 
 	blk_finish_plug(&plug);
+
+	return scanned > 0 ? scanned : 0;
 }
 
 /******************************************************************************
@@ -5176,8 +5179,9 @@ static void lru_gen_age_node(struct pglist_data *pgdat, struct scan_control *sc)
 {
 }
 
-static void lru_gen_shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc)
+static unsigned long lru_gen_shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc)
 {
+	return 0;
 }
 
 #endif /* CONFIG_LRU_GEN */
@@ -5199,7 +5203,8 @@ static void shrink_node_memcg(struct pglist_data *pgdat, struct mem_cgroup *memc
 	bool scan_adjusted;
 
 	if (lru_gen_enabled()) {
-		lru_gen_shrink_lruvec(lruvec, sc);
+		/* MGLRU bypasses get_scan_count(); don't leave *lru_pages uninitialised */
+		*lru_pages = lru_gen_shrink_lruvec(lruvec, sc);
 		return;
 	}
 

@@ -6185,6 +6185,10 @@ static void __paginginit free_area_init_core(struct pglist_data *pgdat)
 	pgdat_page_ext_init(pgdat);
 	spin_lock_init(&pgdat->lru_lock);
 	lruvec_init(node_lruvec(pgdat));
+#ifdef CONFIG_MEMCG
+	/* lruvec_init() zeroed it; MGLRU calls lruvec_pgdat() on the node lruvec */
+	node_lruvec(pgdat)->pgdat = pgdat;
+#endif
 
 	for (j = 0; j < MAX_NR_ZONES; j++) {
 		struct zone *zone = pgdat->node_zones + j;
