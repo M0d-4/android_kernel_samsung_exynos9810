@@ -3015,13 +3015,26 @@ static int decon_set_displayport_mode(struct decon_device *decon,
 			goto unlock_training;
 		}
 		video_enabled = displayport_read(SST1_VIDEO_ENABLE) & VIDEO_EN;
-		mutex_unlock(&dp->cmd_lock);
-		ret = displayport_set_video_enabled(decon->displayport_sd,
-			false);
-		if (ret)
-			goto unlock_training;
 		underflow_irq = displayport_read(SST1_INTERRUPT_MASK_SET0) &
 			MAPI_FIFO_UNDER_FLOW_MASK;
+		displayport_reg_set_interrupt_mask(
+			VIDEO_FIFO_UNDER_FLOW_MASK, 0);
+		if (video_enabled && psr.psr_mode == DECON_VIDEO_MODE &&
+				decon->lcd_info && decon->lcd_info->fps &&
+				decon_read_mask(decon->id, GLOBAL_CONTROL,
+					GLOBAL_CONTROL_RUN_STATUS)) {
+			int drain_ret;
+
+			drain_ret = decon_reg_stop_perframe(decon->id,
+				decon->dt.out_idx[0], &psr);
+			if (drain_ret)
+				decon_info("DP frame drain timed out (%d)\n",
+					drain_ret);
+			else
+				decon_dbg("DP frame drain completed\n");
+		}
+		displayport_reg_stop();
+		mutex_unlock(&dp->cmd_lock);
 		decon_reg_set_int(decon->id, &psr, 0);
 		ret = decon_reg_stop(decon->id, decon->dt.out_idx[0], &psr);
 		if (ret) {
