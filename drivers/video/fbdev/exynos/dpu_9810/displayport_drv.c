@@ -2562,6 +2562,72 @@ static int displayport_s_dv_timings(struct v4l2_subdev *sd,
 	return 0;
 }
 
+/* The caller must hold the HPD and training locks. */
+int displayport_set_video_enabled(struct v4l2_subdev *sd, bool enabled)
+{
+	struct displayport_device *displayport = container_of(sd,
+		struct displayport_device, sd);
+	int ret = 0;
+
+	mutex_lock(&displayport->cmd_lock);
+	if (!displayport->hpd_current_state)
+		ret = -ENODEV;
+	else if (displayport->state != DISPLAYPORT_STATE_ON)
+		ret = -EBUSY;
+	else if (enabled)
+		displayport_reg_start();
+	else
+		displayport_reg_stop();
+	mutex_unlock(&displayport->cmd_lock);
+	return ret;
+}
+
+/* The caller must quiesce DECON and hold the HPD and training locks. */
+int displayport_set_active_timings(struct v4l2_subdev *sd,
+		struct v4l2_dv_timings *timings)
+{
+	struct displayport_device *displayport = container_of(sd,
+		struct displayport_device, sd);
+	bool running, video_enabled = false;
+	u8 old_bpc;
+	int ret;
+
+	mutex_lock(&displayport->cmd_lock);
+	if (!displayport->hpd_current_state) {
+		ret = -ENODEV;
+		goto unlock;
+	}
+	running = displayport->state == DISPLAYPORT_STATE_ON;
+	old_bpc = displayport->bpc;
+	if (running) {
+		video_enabled = displayport_read(SST1_VIDEO_ENABLE) & VIDEO_EN;
+		displayport_reg_stop();
+	}
+
+	ret = displayport_s_dv_timings(sd, timings);
+	if (running) {
+		displayport->bpc = old_bpc;
+		decon_displayport_get_out_sd(get_decon_drvdata(2));
+		if (!ret) {
+			if (displayport->bist_used)
+				displayport_reg_set_bist_video_configuration(
+					displayport->cur_video, displayport->bpc,
+					displayport->bist_type, displayport->dyn_range);
+			else
+				displayport_reg_set_video_configuration(
+					displayport->cur_video, displayport->bpc,
+					displayport->dyn_range);
+			displayport_set_avi_infoframe();
+		}
+		if (video_enabled)
+			displayport_reg_start();
+	}
+
+unlock:
+	mutex_unlock(&displayport->cmd_lock);
+	return ret;
+}
+
 static int displayport_g_dv_timings(struct v4l2_subdev *sd,
 		struct v4l2_dv_timings *timings)
 {

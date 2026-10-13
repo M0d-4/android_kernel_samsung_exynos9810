@@ -1217,6 +1217,11 @@ u32 displayport_reg_get_hdcp22_encryption_enable(void);
 void displayport_reg_set_aux_pn_inv(u32 val);
 void displayport_hpd_changed(int state);
 int displayport_get_hpd_state(void);
+bool displayport_match_timings(const struct v4l2_dv_timings *t1,
+		const struct v4l2_dv_timings *t2, unsigned pclock_delta);
+int displayport_set_active_timings(struct v4l2_subdev *sd,
+		struct v4l2_dv_timings *timings);
+int displayport_set_video_enabled(struct v4l2_subdev *sd, bool enabled);
 bool is_displayport_not_running(void);
 
 int displayport_reg_stand_alone_crc_sorting(void);

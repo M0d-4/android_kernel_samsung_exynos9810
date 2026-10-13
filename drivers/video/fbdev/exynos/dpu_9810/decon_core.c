@@ -424,14 +424,15 @@ static void decon_free_dma_buf(struct decon_device *decon,
 #endif
 }
 
-void decon_set_black_window(struct decon_device *decon)
+static void decon_set_black_window_index(struct decon_device *decon,
+		int win_idx)
 {
 	struct decon_window_regs win_regs;
 	struct decon_lcd *lcd = decon->lcd_info;
 
 	memset(&win_regs, 0, sizeof(struct decon_window_regs));
 	win_regs.wincon = wincon(0x8, 0xFF, 0xFF, 0xFF, DECON_BLENDING_NONE,
-			decon->dt.dft_win);
+			win_idx);
 	win_regs.start_pos = win_start_pos(0, 0);
 	win_regs.end_pos = win_end_pos(0, 0, lcd->xres, lcd->yres);
 	decon_info("xres %d yres %d win_start_pos %x win_end_pos %x\n",
@@ -447,9 +448,14 @@ void decon_set_black_window(struct decon_device *decon)
 			win_regs.pixel_count, win_regs.whole_w,
 			win_regs.whole_h, win_regs.offset_x,
 			win_regs.offset_y);
-	decon_reg_set_window_control(decon->id, decon->dt.dft_win,
+	decon_reg_set_window_control(decon->id, win_idx,
 			&win_regs, true);
-	decon_reg_update_req_window(decon->id, decon->dt.dft_win);
+	decon_reg_update_req_window(decon->id, win_idx);
+}
+
+void decon_set_black_window(struct decon_device *decon)
+{
+	decon_set_black_window_index(decon, decon->dt.dft_win);
 }
 
 int decon_tui_protection(bool tui_en)
@@ -2830,6 +2836,288 @@ end:
 	return ret;
 }
 
+#if defined(CONFIG_EXYNOS_DISPLAYPORT)
+#if defined(CONFIG_EXYNOS_COMMON_PANEL)
+static bool decon_displayport_frame_fits(struct decon_device *decon)
+{
+	struct decon_reg_data *regs = &decon->last_regs;
+	struct decon_lcd *lcd = decon->lcd_info;
+	struct decon_frame *dst;
+	bool active = false;
+	int i;
+
+	if (!regs->num_of_window)
+		return false;
+	for (i = 0; i < decon->dt.max_win; i++) {
+		if (!(regs->win_regs[i].wincon & WIN_EN_F(i)))
+			continue;
+		dst = &regs->dpp_config[i].dst;
+		if (dst->f_w != lcd->xres || dst->f_h != lcd->yres ||
+				!dst->w || !dst->h ||
+				dst->x < 0 || dst->y < 0 ||
+				dst->x >= lcd->xres || dst->y >= lcd->yres ||
+				dst->w > lcd->xres - dst->x ||
+				dst->h > lcd->yres - dst->y)
+			return false;
+		active = true;
+	}
+	return active;
+}
+#endif
+
+static int decon_start_displayport(struct decon_device *decon,
+		struct decon_mode_info *psr, bool video_enabled,
+		bool reuse_frame)
+{
+	int win_idx = 0, ret;
+
+	/* HWC reserves window 0 for the connected external display. */
+#if defined(CONFIG_EXYNOS_COMMON_PANEL)
+	if (decon->last_regs.num_of_window) {
+		for (win_idx = 0; win_idx < decon->dt.max_win; win_idx++)
+			if (decon->last_regs.win_regs[win_idx].wincon &
+					WIN_EN_F(win_idx))
+				break;
+		if (win_idx == decon->dt.max_win)
+			win_idx = 0;
+	}
+start_black:
+#endif
+	decon_set_black_window_index(decon, win_idx);
+	decon_reg_set_int(decon->id, psr, 1);
+	ret = decon_reg_start(decon->id, psr);
+	if (!ret)
+		ret = displayport_set_video_enabled(decon->displayport_sd,
+			video_enabled);
+	if (!ret)
+		ret = decon_reg_wait_for_update_timeout(decon->id,
+			SHADOW_UPDATE_TIMEOUT);
+	if (ret)
+		return ret;
+
+#if defined(CONFIG_EXYNOS_COMMON_PANEL)
+	if (reuse_frame && decon_displayport_frame_fits(decon)) {
+		ret = decon_update_last_regs(decon, &decon->last_regs);
+		if (ret || decon->last_regs.num_of_window)
+			return ret;
+		reuse_frame = false;
+		goto start_black;
+	}
+#endif
+	return 0;
+}
+
+static int decon_set_displayport_mode(struct decon_device *decon,
+		const struct decon_display_mode *mode)
+{
+	struct displayport_device *dp = get_displayport_drvdata();
+	struct v4l2_enum_dv_timings candidate = { 0 };
+	struct v4l2_dv_timings timing = { 0 }, old_timing;
+	struct decon_mode_info psr;
+	struct decon_param param;
+	u64 pixels;
+	u32 fps;
+	int ret, restore_ret;
+	u8 old_bpc;
+	bool running, started = false, underflow_irq = false;
+	bool video_enabled = false;
+	bool native = false, ambiguous = false;
+
+	if (!dp || !decon->displayport_sd)
+		return -ENODEV;
+	/* HPD waits for DECON power changes while holding this lock. */
+	if (!mutex_trylock(&dp->hpd_lock))
+		return -EBUSY;
+	mutex_lock(&decon->lock);
+	if (!displayport_get_hpd_state()) {
+		ret = -ENODEV;
+		goto unlock_decon;
+	}
+	if (decon->state != DECON_STATE_ON &&
+			decon->state != DECON_STATE_OFF) {
+		ret = -EBUSY;
+		goto unlock_decon;
+	}
+
+	kthread_flush_worker(&decon->up.worker);
+	mutex_lock(&dp->training_lock);
+	ret = v4l2_subdev_call(decon->displayport_sd, video,
+		g_dv_timings, &old_timing);
+	if (ret)
+		goto unlock_training;
+	/* HWC reorders its indices to put the EDID native mode first. */
+	for (candidate.index = 0;
+			candidate.index < supported_videos_pre_cnt;
+			candidate.index++) {
+		ret = v4l2_subdev_call(decon->displayport_sd, core, ioctl,
+			DISPLAYPORT_IOC_GET_ENUM_DV_TIMINGS, &candidate);
+		if (ret == -EINVAL || ret == -E2BIG)
+			continue;
+		if (ret)
+			goto unlock_training;
+		if (candidate.timings.bt.width != mode->width ||
+				candidate.timings.bt.height != mode->height ||
+				candidate.timings.bt.interlaced)
+			continue;
+		pixels = (u64)V4L2_DV_BT_FRAME_WIDTH(&candidate.timings.bt) *
+			V4L2_DV_BT_FRAME_HEIGHT(&candidate.timings.bt);
+		if (!pixels)
+			continue;
+		/* HWC rounds its float period before truncating to whole Hz. */
+		fps = div64_u64(candidate.timings.bt.pixelclock, pixels);
+		if (fps != mode->fps &&
+				!(fps == mode->fps + 1 &&
+				  candidate.timings.bt.pixelclock == pixels * fps))
+			continue;
+		if (displayport_match_timings(&old_timing,
+				&candidate.timings, 0)) {
+			timing = candidate.timings;
+			ambiguous = false;
+			break;
+		}
+		if (candidate.index == VDUMMYTIMING) {
+			timing = candidate.timings;
+			native = true;
+			ambiguous = false;
+			continue;
+		}
+		if (native)
+			continue;
+		if (timing.bt.width && !displayport_match_timings(&timing,
+				&candidate.timings, 0)) {
+			ambiguous = true;
+			continue;
+		}
+		timing = candidate.timings;
+	}
+	if (!timing.bt.width || ambiguous) {
+		ret = -EINVAL;
+		goto unlock_training;
+	}
+	if (displayport_match_timings(&old_timing, &timing, 0)) {
+		ret = 0;
+		goto unlock_training;
+	}
+
+	old_bpc = dp->bpc;
+	running = decon->state == DECON_STATE_ON;
+	decon_to_psr_info(decon, &psr);
+	if (running) {
+		mutex_lock(&dp->cmd_lock);
+		if (!dp->hpd_current_state) {
+			mutex_unlock(&dp->cmd_lock);
+			ret = -ENODEV;
+			goto unlock_training;
+		}
+		if (dp->state != DISPLAYPORT_STATE_ON) {
+			mutex_unlock(&dp->cmd_lock);
+			ret = -EBUSY;
+			goto unlock_training;
+		}
+		video_enabled = displayport_read(SST1_VIDEO_ENABLE) & VIDEO_EN;
+		mutex_unlock(&dp->cmd_lock);
+		ret = displayport_set_video_enabled(decon->displayport_sd,
+			false);
+		if (ret)
+			goto unlock_training;
+		underflow_irq = displayport_read(SST1_INTERRUPT_MASK_SET0) &
+			MAPI_FIFO_UNDER_FLOW_MASK;
+		decon_reg_set_int(decon->id, &psr, 0);
+		ret = decon_reg_stop(decon->id, decon->dt.out_idx[0], &psr);
+		if (ret) {
+			restore_ret = decon_reg_start(decon->id, &psr);
+			if (!restore_ret)
+				restore_ret = displayport_set_video_enabled(
+					decon->displayport_sd, video_enabled);
+			if (restore_ret)
+				decon_err("DP stop recovery failed (%d)\n",
+					restore_ret);
+			decon_reg_set_int(decon->id, &psr, 1);
+			goto restore_underflow;
+		}
+		decon_reg_clear_int_all(decon->id);
+#if defined(CONFIG_EXYNOS_CONTENT_PATH_PROTECTION)
+		decon_set_protected_content(decon, NULL);
+#endif
+		decon->cur_using_dpp = 0;
+		decon_dpp_stop(decon, false);
+	}
+
+	ret = displayport_set_active_timings(decon->displayport_sd, &timing);
+	if (!ret && running) {
+		decon_to_init_param(decon, &param);
+		ret = decon_reg_init(decon->id, decon->dt.out_idx[0], &param);
+		if (!ret) {
+			/* Restart the DP input before the next HWC frame. */
+			started = true;
+			ret = decon_start_displayport(decon, &psr,
+				video_enabled,
+				old_timing.bt.width == timing.bt.width &&
+				old_timing.bt.height == timing.bt.height);
+		}
+	}
+	if (ret) {
+		if (started) {
+			restore_ret = displayport_set_video_enabled(
+				decon->displayport_sd, false);
+			if (restore_ret) {
+				decon_err("DP rollback pause failed (%d)\n",
+					restore_ret);
+				goto restore_underflow;
+			}
+			decon_reg_set_int(decon->id, &psr, 0);
+			restore_ret = decon_reg_stop(decon->id,
+				decon->dt.out_idx[0], &psr);
+			if (restore_ret) {
+				decon_err("DP rollback stop failed (%d)\n",
+					restore_ret);
+				restore_ret = decon_reg_start(decon->id, &psr);
+				if (!restore_ret)
+					restore_ret =
+						displayport_set_video_enabled(
+							decon->displayport_sd,
+							video_enabled);
+				if (restore_ret)
+					decon_err("DP rollback restart failed (%d)\n",
+						restore_ret);
+				decon_reg_set_int(decon->id, &psr, 1);
+				goto restore_underflow;
+			}
+		}
+		restore_ret = displayport_set_active_timings(
+			decon->displayport_sd, &old_timing);
+		dp->bpc = old_bpc;
+		if (!restore_ret && running) {
+			decon_to_init_param(decon, &param);
+			restore_ret = decon_reg_init(decon->id,
+				decon->dt.out_idx[0], &param);
+			decon_reg_set_int(decon->id, &psr, 1);
+			if (!restore_ret)
+				restore_ret = decon_start_displayport(decon,
+					&psr, video_enabled, true);
+		}
+		if (restore_ret)
+			decon_err("DP mode rollback failed (%d)\n", restore_ret);
+		if (running)
+			decon_reg_set_int(decon->id, &psr, 1);
+	} else if (running) {
+		DPU_FULL_RECT(&decon->win_up.prev_up_region, decon->lcd_info);
+		decon_reg_set_int(decon->id, &psr, 1);
+	}
+
+restore_underflow:
+	if (running)
+		displayport_reg_set_interrupt_mask(VIDEO_FIFO_UNDER_FLOW_MASK,
+			underflow_irq);
+unlock_training:
+	mutex_unlock(&dp->training_lock);
+unlock_decon:
+	mutex_unlock(&decon->lock);
+	mutex_unlock(&dp->hpd_lock);
+	return ret;
+}
+#endif
+
 static int decon_ioctl(struct fb_info *info, unsigned int cmd,
 			unsigned long arg)
 {
@@ -3227,6 +3515,13 @@ static int decon_ioctl(struct fb_info *info, unsigned int cmd,
 			ret = -EFAULT;
 			break;
 		}
+
+#if defined(CONFIG_EXYNOS_DISPLAYPORT)
+		if (decon->dt.out_type == DECON_OUT_DP) {
+			ret = decon_set_displayport_mode(decon, &dm_info);
+			break;
+		}
+#endif
 
 		if (dm_info.index < mres_info->mres_number) {
 			if (!IS_DECON_OFF_STATE(decon)) {
