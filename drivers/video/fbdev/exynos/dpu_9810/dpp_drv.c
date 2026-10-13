@@ -703,21 +703,25 @@ static int dpp_stop(struct dpp_device *dpp, bool reset)
 	mutex_lock(&dpp->lock);
 
 	if (dpp->state == DPP_STATE_OFF) {
-		dpp_warn("dpp%d is already disabled\n", dpp->id);
-		goto err;
+		if (!reset) {
+			dpp_warn("dpp%d is already disabled\n", dpp->id);
+			goto err;
+		}
+	} else {
+		DPU_EVENT_LOG(DPU_EVT_DPP_STOP, &dpp->sd, ktime_set(0, 0));
+
+		disable_irq(dpp->res.dma_irq);
+		disable_irq(dpp->res.irq);
+
+		del_timer(&dpp->d.op_timer);
 	}
-
-	DPU_EVENT_LOG(DPU_EVT_DPP_STOP, &dpp->sd, ktime_set(0, 0));
-
-	disable_irq(dpp->res.dma_irq);
-	disable_irq(dpp->res.irq);
-
-	del_timer(&dpp->d.op_timer);
-	dpp_reg_deinit(dpp->id, reset);
+	ret = dpp_reg_deinit(dpp->id, reset);
+	/* A reset retry must not disable the same IRQs twice. */
+	dpp->state = DPP_STATE_OFF;
+	if (ret)
+		goto err;
 
 	dpp_dbg("dpp%d is stopped\n", dpp->id);
-
-	dpp->state = DPP_STATE_OFF;
 err:
 	mutex_unlock(&dpp->lock);
 	return ret;

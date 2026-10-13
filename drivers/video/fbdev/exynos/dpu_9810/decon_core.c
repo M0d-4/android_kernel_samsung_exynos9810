@@ -381,6 +381,36 @@ void decon_dpp_stop(struct decon_device *decon, bool do_reset)
 	}
 }
 
+#if defined(CONFIG_EXYNOS_DISPLAYPORT)
+static int decon_reset_displayport_dpps(struct decon_device *decon)
+{
+	unsigned long used = decon->prev_used_dpp;
+	struct v4l2_subdev *sd;
+	int i, ret, err = 0;
+
+	for (i = 0; i < MAX_DPP_SUBDEV; i++) {
+		if (!test_bit(i, &used))
+			continue;
+		sd = decon->dpp_sd[i];
+		ret = sd ? v4l2_subdev_call(sd, core, ioctl, DPP_STOP,
+				(void *)true) : -ENODEV;
+		if (ret) {
+			decon_err("DP reset failed for DPP%d (%d)\n", i, ret);
+			if (!err)
+				err = ret;
+		}
+	}
+	/* Retain every owner until all channel resets have completed. */
+	if (err)
+		return err;
+
+	decon->cur_using_dpp = 0;
+	decon->prev_used_dpp &= ~used;
+	decon->dpp_err_stat &= ~used;
+	return 0;
+}
+#endif
+
 static void decon_free_unused_buf(struct decon_device *decon,
 		struct decon_reg_data *regs, int win, int plane)
 {
@@ -625,6 +655,13 @@ static int _decon_enable(struct decon_device *decon,
 		decon->state = state;
 		return 0;
 	}
+
+#if defined(CONFIG_EXYNOS_DISPLAYPORT)
+	if (decon->dt.out_type == DECON_OUT_DP && decon->prev_used_dpp) {
+		decon_err("DP reset incomplete; reboot before enabling\n");
+		return -EBUSY;
+	}
+#endif
 
 	pm_stay_awake(decon->dev);
 	dev_warn(decon->dev, "pm_stay_awake");
@@ -2939,6 +2976,10 @@ static int decon_set_displayport_mode(struct decon_device *decon,
 		goto unlock_decon;
 	}
 
+	if (decon->state == DECON_STATE_OFF && decon->prev_used_dpp) {
+		ret = -EAGAIN;
+		goto unlock_decon;
+	}
 	kthread_flush_worker(&decon->up.worker);
 	mutex_lock(&dp->training_lock);
 	ret = v4l2_subdev_call(decon->displayport_sd, video,
@@ -3052,8 +3093,14 @@ static int decon_set_displayport_mode(struct decon_device *decon,
 #if defined(CONFIG_EXYNOS_CONTENT_PATH_PROTECTION)
 		decon_set_protected_content(decon, NULL);
 #endif
-		decon->cur_using_dpp = 0;
-		decon_dpp_stop(decon, false);
+		ret = decon_reset_displayport_dpps(decon);
+		if (ret) {
+			/* Preserve buffers until reboot. */
+			decon->bts.ops->bts_release_bw(decon);
+			decon_reg_set_te_qactive_pll_mode(decon->id, 0);
+			decon->state = DECON_STATE_OFF;
+			goto restore_underflow;
+		}
 	}
 
 	ret = displayport_set_active_timings(decon->displayport_sd, &timing);

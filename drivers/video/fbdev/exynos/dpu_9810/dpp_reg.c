@@ -1329,6 +1329,8 @@ void dpp_reg_init(u32 id)
 
 int dpp_reg_deinit(u32 id, bool reset)
 {
+	int dpp_ret, dma_ret;
+
 	dma_reg_clear_irq_all(id);
 	dpp_reg_set_irq_clear_all(id);
 
@@ -1339,8 +1341,9 @@ int dpp_reg_deinit(u32 id, bool reset)
 		dma_reg_set_sw_reset(id);
 		dpp_reg_set_sw_reset(id);
 
-		if (dpp_reg_wait_sw_reset_status(id)
-			&& dma_reg_wait_sw_reset_status(id))
+		dpp_ret = dpp_reg_wait_sw_reset_status(id);
+		dma_ret = dma_reg_wait_sw_reset_status(id);
+		if (dpp_ret || dma_ret)
 			return -EBUSY;
 	}
 
