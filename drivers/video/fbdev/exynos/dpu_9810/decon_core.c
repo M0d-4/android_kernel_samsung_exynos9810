@@ -3100,15 +3100,31 @@ start_black:
 #endif
 	decon_set_black_window_index(decon, win_idx);
 	decon_reg_set_int(decon->id, psr, 1);
-	ret = decon_reg_start(decon->id, psr);
-	if (!ret)
+	if (video_enabled) {
 		ret = displayport_set_video_enabled(decon->displayport_sd,
-			video_enabled);
+						    true);
+		if (ret)
+			return ret;
+	}
+	ret = decon_reg_start(decon->id, psr);
+	if (!ret && !video_enabled)
+		ret = displayport_set_video_enabled(decon->displayport_sd,
+						    false);
 	if (!ret)
 		ret = decon_reg_wait_for_update_timeout(decon->id,
 			SHADOW_UPDATE_TIMEOUT);
-	if (ret)
+	if (ret) {
+		if (video_enabled) {
+			int pause_ret;
+
+			pause_ret = displayport_set_video_enabled(
+				decon->displayport_sd, false);
+			if (pause_ret)
+				decon_err("DP seed failure pause failed (%d)\n",
+					  pause_ret);
+		}
 		return ret;
+	}
 
 #if defined(CONFIG_EXYNOS_COMMON_PANEL)
 	if (reuse_frame && decon_displayport_frame_fits(decon)) {
