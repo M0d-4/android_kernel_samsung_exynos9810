@@ -2220,8 +2220,9 @@ void decon_reg_set_win_bnd_function(u32 id, u32 win_idx,
 				win_idx, af_d, ab_d, af_a, ab_a);
 }
 
-void decon_reg_set_window_control(u32 id, int win_idx,
-		struct decon_window_regs *regs, u32 winmap_en)
+static void decon_reg_set_window_control_ordered(u32 id, int win_idx,
+						 struct decon_window_regs *regs,
+						 u32 winmap_en, bool dp)
 {
 	u32 win_en = regs->wincon & WIN_EN_F(win_idx) ? 1 : 0;
 
@@ -2234,15 +2235,37 @@ void decon_reg_set_window_control(u32 id, int win_idx,
 							regs->start_time);
 	}
 
-	decon_reg_set_win_enable(id, win_idx, win_en);
-	if (win_en)
+	if (dp && win_en) {
+		decon_reg_config_win_channel(id, win_idx, regs->type);
 		decon_reg_set_winmap(id, win_idx, regs->colormap, winmap_en);
-	decon_reg_config_win_channel(id, win_idx, regs->type);
+		decon_reg_set_win_enable(id, win_idx, true);
+	} else {
+		decon_reg_set_win_enable(id, win_idx, win_en);
+		if (win_en)
+			decon_reg_set_winmap(id, win_idx, regs->colormap,
+					     winmap_en);
+		decon_reg_config_win_channel(id, win_idx, regs->type);
+	}
 
 	/* decon_dbg("%s: regs->type(%d)\n", __func__, regs->type); */
 	decon_dbg("%s: regs->type(%d)\n", __func__, regs->type);
 }
 
+
+void decon_reg_set_window_control(u32 id, int win_idx,
+				  struct decon_window_regs *regs, u32 winmap_en)
+{
+	decon_reg_set_window_control_ordered(id, win_idx, regs, winmap_en,
+					     false);
+}
+
+void decon_reg_set_window_control_dp(u32 id, int win_idx,
+				     struct decon_window_regs *regs,
+				     u32 winmap_en)
+{
+	decon_reg_set_window_control_ordered(id, win_idx, regs, winmap_en,
+					     true);
+}
 
 void decon_reg_update_req_and_unmask(u32 id, struct decon_mode_info *psr)
 {
