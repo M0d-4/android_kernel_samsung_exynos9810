@@ -598,6 +598,7 @@ static int __do_huge_pmd_anonymous_page(struct fault_env *fe, struct page *page,
 		atomic_long_inc(&vma->vm_mm->nr_ptes);
 		spin_unlock(fe->ptl);
 		count_vm_event(THP_FAULT_ALLOC);
+		mem_cgroup_count_vm_event(vma->vm_mm, THP_FAULT_ALLOC);
 	}
 
 	return 0;
@@ -1086,6 +1087,7 @@ alloc:
 	}
 
 	count_vm_event(THP_FAULT_ALLOC);
+	mem_cgroup_count_vm_event(vma->vm_mm, THP_FAULT_ALLOC);
 
 	if (!page)
 		clear_huge_page(new_page, haddr, HPAGE_PMD_NR);

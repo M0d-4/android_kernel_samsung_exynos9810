@@ -997,6 +997,7 @@ static void collapse_huge_page(struct mm_struct *mm,
 		result = SCAN_CGROUP_CHARGE_FAIL;
 		goto out_nolock;
 	}
+	mem_cgroup_count_vm_event(mm, THP_COLLAPSE_ALLOC);
 
 	down_read(&mm->mmap_sem);
 	result = hugepage_vma_revalidate(mm, address, &vma);

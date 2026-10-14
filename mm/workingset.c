@@ -519,6 +519,7 @@ static enum lru_status shadow_lru_isolate(struct list_head *item,
 					  spinlock_t *lru_lock,
 					  void *arg)
 {
+	struct shrink_control *sc = arg;
 	struct address_space *mapping;
 	struct radix_tree_node *node;
 	unsigned int i;
@@ -567,7 +568,8 @@ static enum lru_status shadow_lru_isolate(struct list_head *item,
 		}
 	}
 	BUG_ON(workingset_node_shadows(node));
-	inc_node_state(page_pgdat(virt_to_page(node)), WORKINGSET_NODERECLAIM);
+	mod_lruvec_state(mem_cgroup_lruvec(NODE_DATA(sc->nid), sc->memcg),
+			 WORKINGSET_NODERECLAIM, 1);
 	if (!__radix_tree_delete_node(&mapping->page_tree, node))
 		BUG();
 
@@ -589,7 +591,7 @@ static unsigned long scan_shadow_nodes(struct shrinker *shrinker,
 	/* list_lru lock nests inside IRQ-safe mapping->tree_lock */
 	local_irq_disable();
 	ret =  list_lru_shrink_walk(&workingset_shadow_nodes, sc,
-				    shadow_lru_isolate, NULL);
+				    shadow_lru_isolate, sc);
 	local_irq_enable();
 	return ret;
 }

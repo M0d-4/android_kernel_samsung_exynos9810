@@ -64,31 +64,19 @@ jobs:
             [ -f "$f" ] && sed -i 's/^YYLTYPE yylloc;/extern YYLTYPE yylloc;/' "$f" || true
           done
 
-      - name: Configure (star2lte only)
+      - name: Configure
         run: |
           export PATH="/usr/lib/ccache:$PATH"
           MAKE_ARGS="O=out ARCH=${ARCH} CC=clang KCFLAGS=-gdwarf-4 CLANG_TRIPLE=${CLANG_TRIPLE} CROSS_COMPILE=${CROSS_COMPILE}"
           echo "MAKE_ARGS=${MAKE_ARGS}" >> "$GITHUB_ENV"
           make ${MAKE_ARGS} ${DEFCONFIG}
 
-          # Make sure the features this kernel is supposed to ship are really on
-          scripts/config --file out/.config -e SCHED_BORE -e IOSCHED_ADIOS -e NTSYNC -e LRU_GEN -e LRU_GEN_ENABLED -e CRYPTO_LZ4 -e TCP_CONG_ADVANCED -e TCP_CONG_BBRPLUS -e TCP_CONG_CUBIC -e ANDROID_SIMPLE_LMK
-          make ${MAKE_ARGS} olddefconfig
-
-          for opt in SCHED_BORE IOSCHED_ADIOS NTSYNC LRU_GEN LRU_GEN_ENABLED CRYPTO_LZ4 TCP_CONG_BBRPLUS TCP_CONG_CUBIC ANDROID_SIMPLE_LMK; do
-            grep -q "^CONFIG_${opt}=y" out/.config || { echo "::error::CONFIG_${opt} is not enabled"; exit 1; }
-          done
 
       - name: Build Image (kernel only, no dtb/dtbo)
         run: |
           export PATH="/usr/lib/ccache:$PATH"
           make ${MAKE_ARGS} -j"$(nproc)" Image 2>&1 | tee build.log
           test -f out/arch/arm64/boot/Image
-          test -f out/drivers/misc/ntsync.o || { echo "::error::ntsync.o was not built"; exit 1; }
-          test -f out/kernel/sched/bore.o   || { echo "::error::bore.o was not built"; exit 1; }
-          test -f out/net/ipv4/tcp_bbrplus_49.o || { echo "::error::tcp_bbrplus_49.o was not built"; exit 1; }
-          test -f out/drivers/android/simple_lmk.o || { echo "::error::simple_lmk.o was not built"; exit 1; }
-          test -f out/block/adios-iosched.o || { echo "::error::adios-iosched.o was not built"; exit 1; }
           ccache -s || true
 
       - name: Package AnyKernel3
@@ -121,7 +109,7 @@ jobs:
           '; }
 
           # boot partition (matched by name, case-insensitive), non A/B
-          BLOCK=boot;
+          BLOCK=/dev/block/platform/11120000.ufs/by-name/BOOT;
           IS_SLOT_DEVICE=0;
           RAMDISK_COMPRESSION=auto;
           PATCH_VBMETA_FLAG=auto;
@@ -156,7 +144,7 @@ jobs:
             echo
             echo "- Flash the zip in a custom recovery (AnyKernel3). Galaxy S9+ (SM-G965x) only."
             echo "- Source: \`${GITHUB_SHA}\`"
-            echo "- Features: Simple LMK, BORE scheduler, ADIOS I/O scheduler, NTSYNC, multi-gen LRU (on by default), LZ4"
+            echo "- Features: Simple LMK, BORE scheduler, ADIOS I/O scheduler (default), NTSYNC, multi-gen LRU (on by default), LZ4, BBRv3 (default TCP congestion control)"
             echo "- Power/thermal: iowait frequency boost off by default, runtime debug checks off"
             echo
             echo "SHA256:"

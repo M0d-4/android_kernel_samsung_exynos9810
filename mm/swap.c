@@ -271,6 +271,8 @@ static void __activate_page(struct page *page, struct lruvec *lruvec,
 		trace_mm_lru_activate(page);
 
 		__count_vm_event(PGACTIVATE);
+		__count_memcg_events(lruvec_memcg(lruvec), PGACTIVATE,
+				     hpage_nr_pages(page));
 		update_page_reclaim_stat(lruvec, file, 1);
 	}
 }
@@ -600,8 +602,11 @@ static void lru_deactivate_file_fn(struct page *page, struct lruvec *lruvec,
 		__count_vm_event(PGROTATED);
 	}
 
-	if (active)
+	if (active) {
 		__count_vm_event(PGDEACTIVATE);
+		__count_memcg_events(lruvec_memcg(lruvec), PGDEACTIVATE,
+				     hpage_nr_pages(page));
+	}
 	update_page_reclaim_stat(lruvec, file, 0);
 }
 
@@ -618,6 +623,8 @@ static void lru_deactivate_fn(struct page *page, struct lruvec *lruvec,
 		add_page_to_lru_list(page, lruvec);
 
 		__count_vm_event(PGDEACTIVATE);
+		__count_memcg_events(lruvec_memcg(lruvec), PGDEACTIVATE,
+				     hpage_nr_pages(page));
 		update_page_reclaim_stat(lruvec, file, 0);
 	}
 }

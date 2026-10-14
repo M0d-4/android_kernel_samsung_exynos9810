@@ -1302,8 +1302,10 @@ lazyfree:
 		 */
 		__ClearPageLocked(page);
 free_it:
-		if (ret == SWAP_LZFREE)
+		if (ret == SWAP_LZFREE) {
 			count_vm_event(PGLAZYFREED);
+			count_memcg_page_event(page, PGLAZYFREED);
+		}
 
 		nr_reclaimed++;
 
@@ -1864,6 +1866,9 @@ shrink_inactive_list(unsigned long nr_to_scan, struct lruvec *lruvec,
 		else
 			__count_vm_events(PGSCAN_DIRECT, nr_scanned);
 	}
+	__count_memcg_events(lruvec_memcg(lruvec),
+			     current_is_kswapd() ? PGSCAN_KSWAPD : PGSCAN_DIRECT,
+			     nr_scanned);
 	spin_unlock_irq(&pgdat->lru_lock);
 
 	if (nr_taken == 0)
@@ -1887,6 +1892,9 @@ shrink_inactive_list(unsigned long nr_to_scan, struct lruvec *lruvec,
 		else
 			__count_vm_events(PGSTEAL_DIRECT, nr_reclaimed);
 	}
+	__count_memcg_events(lruvec_memcg(lruvec),
+			     current_is_kswapd() ? PGSTEAL_KSWAPD : PGSTEAL_DIRECT,
+			     nr_reclaimed);
 
 	putback_inactive_pages(lruvec, &page_list);
 
@@ -2011,8 +2019,10 @@ static void move_active_pages_to_lru(struct lruvec *lruvec,
 		}
 	}
 
-	if (!is_active_lru(lru))
+	if (!is_active_lru(lru)) {
 		__count_vm_events(PGDEACTIVATE, pgmoved);
+		__count_memcg_events(lruvec_memcg(lruvec), PGDEACTIVATE, pgmoved);
+	}
 }
 
 static void shrink_active_list(unsigned long nr_to_scan,
@@ -2051,6 +2061,7 @@ static void shrink_active_list(unsigned long nr_to_scan,
 	if (global_reclaim(sc))
 		__mod_node_page_state(pgdat, NR_PAGES_SCANNED, nr_scanned);
 	__count_vm_events(PGREFILL, nr_scanned);
+	__count_memcg_events(lruvec_memcg(lruvec), PGREFILL, nr_scanned);
 
 	spin_unlock_irq(&pgdat->lru_lock);
 
@@ -2737,11 +2748,6 @@ static struct mem_cgroup *get_mem_cgroup_from_mm(struct mm_struct *mm)
 	return memcg;
 }
 
-static void mem_cgroup_put(struct mem_cgroup *memcg)
-{
-	if (memcg)
-		css_put(&memcg->css);
-}
 #else
 static inline struct mem_cgroup *get_mem_cgroup_from_mm(struct mm_struct *mm)
 {
@@ -5437,7 +5443,7 @@ static bool shrink_node(pg_data_t *pgdat, struct scan_control *sc)
 					sc->memcg_low_skipped = 1;
 					continue;
 				}
-				mem_cgroup_events(memcg, MEMCG_LOW, 1);
+				memcg_memory_event(memcg, MEMCG_LOW);
 			}
 
 			reclaimed = sc->nr_reclaimed;
