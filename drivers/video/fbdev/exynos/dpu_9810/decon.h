@@ -637,6 +637,7 @@ struct decon_win_config {
 
 struct decon_reg_data {
 	u32 num_of_window;
+	unsigned long dp_rejected_windows;
 	int plane_cnt[MAX_DECON_WIN + 1];
 	struct list_head list;
 	struct decon_rect blender_bg;
@@ -1215,6 +1216,9 @@ struct decon_device {
 	atomic_t bypass;
 	struct decon_reg_data last_regs;
 #endif
+#if defined(CONFIG_EXYNOS_DISPLAYPORT)
+	struct decon_reg_data dp_replay_regs;
+#endif
 #ifdef CONFIG_DISPLAY_USE_INFO
 	struct notifier_block dpui_notif;
 #endif
@@ -1614,6 +1618,9 @@ void decon_reg_release_resource(u32 id, struct decon_mode_info *psr);
 void decon_reg_set_int(u32 id, struct decon_mode_info *psr, u32 en);
 void decon_reg_set_window_control(u32 id, int win_idx,
 		struct decon_window_regs *regs, u32 winmap_en);
+void decon_reg_set_window_control_dp(u32 id, int win_idx,
+				     struct decon_window_regs *regs,
+				     u32 winmap_en);
 void decon_reg_update_req_and_unmask(u32 id, struct decon_mode_info *psr);
 int decon_reg_wait_update_done_and_mask(u32 id, struct decon_mode_info *psr,
 		u32 timeout);
