@@ -6,6 +6,7 @@
  */
 
 #include <linux/cpufreq.h>
+#include <linux/energy_model.h>
 #include <linux/of.h>
 #include <trace/events/ems.h>
 
@@ -703,6 +704,59 @@ void update_qos_capacity(int cpu, unsigned long freq, unsigned long max)
 	}
 }
 
+#ifdef CONFIG_ENERGY_MODEL
+/*
+ * Energy Model (mainline framework) registration. The EM wants, for each
+ * capacity state ascending: the frequency (kHz) and the active power of one
+ * CPU. Both are already in the EMS energy table of the domain.
+ */
+static int ems_em_active_power(unsigned long *power, unsigned long *freq,
+			       int cpu)
+{
+	struct energy_table *table = &per_cpu(energy_table, cpu);
+	int i;
+
+	if (!table->states)
+		return -EINVAL;
+
+	/* lowest state whose frequency is >= *freq */
+	for (i = 0; i < table->nr_states; i++) {
+		if (table->states[i].frequency >= *freq) {
+			unsigned long p = table->states[i].power;
+
+			*freq = table->states[i].frequency;
+			/* power clamping to EM_CPU_MAX_POWER is done by the EM */
+			*power = p ? p : 1;
+			return 0;
+		}
+	}
+
+	return -EINVAL;
+}
+
+static void ems_register_em(struct cpumask *cpus)
+{
+	struct em_data_callback cb = EM_DATA_CB(ems_em_active_power);
+	struct energy_table *table = &per_cpu(energy_table, cpumask_first(cpus));
+	int ret;
+
+	if (!table->states || !table->nr_states)
+		return;
+
+	ret = em_register_perf_domain(cpus, table->nr_states, &cb);
+	if (ret && ret != -EEXIST) {
+		pr_warn("EM: registration of %*pbl failed (%d)\n",
+			cpumask_pr_args(cpus), ret);
+		return;
+	}
+
+	/* let the scheduler (re)build its perf-domain list */
+	sched_eas_em_rebuild();
+}
+#else
+static inline void ems_register_em(struct cpumask *cpus) { }
+#endif
+
 /*
  * Whenever frequency domain is registered, and energy table corresponding to
  * the domain is created. Because cpu in the same frequency domain has the same
@@ -809,6 +863,9 @@ void init_sched_energy_table(struct cpumask *cpus, int table_size,
 	}
 
 	topology_update();
+
+	/* capacities are final for this domain: publish it to the Energy Model */
+	ems_register_em(cpus);
 }
 
 static ssize_t show_energy_weight(struct kobject *kobj,

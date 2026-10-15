@@ -1,0 +1,9 @@
+config REKERNEL
+	bool "Re:Kernel (report binder/signal events to frozen apps' freezer)"
+	depends on NET && CGROUP_FREEZER
+	default y
+	help
+	  Sends a netlink notification (units 22-25, user port 100) when a
+	  frozen app receives a binder transaction, runs out of async binder
+	  buffer, or is signalled. Userspace uses this to thaw the app.
+	  See https://github.com/Sakion-Team/Re-Kernel

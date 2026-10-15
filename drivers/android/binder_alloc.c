@@ -30,6 +30,7 @@
 #include <linux/list_lru.h>
 #include <linux/uaccess.h>
 #include <linux/highmem.h>
+#include <linux/rekernel.h>
 #include "binder_alloc.h"
 #include "binder_trace.h"
 
@@ -380,6 +381,7 @@ static struct binder_buffer *binder_alloc_new_buf_locked(
 	void __user *end_page_addr;
 	size_t size, data_offsets_size;
 	int ret;
+	struct task_struct *proc_task = NULL;
 
 	if (alloc->vma == NULL) {
 		pr_err("%d: binder_alloc_buf, no vma\n",
@@ -402,6 +404,25 @@ static struct binder_buffer *binder_alloc_new_buf_locked(
 				"%d: got transaction with invalid extra_buffers_size %zd\n",
 				alloc->pid, extra_buffers_size);
 		return ERR_PTR(-EINVAL);
+	}
+	if (is_async
+		&& (alloc->free_async_space < 3 * (size + sizeof(struct binder_buffer))
+		|| (alloc->free_async_space < WARN_AHEAD_SPACE))) {
+		if (rekernel_ready()) {
+			/* keep the task pinned by RCU while we inspect it */
+			rcu_read_lock();
+			proc_task = find_task_by_vpid(alloc->pid);
+			if (proc_task != NULL && line_is_frozen(proc_task)) {
+				char binder_kmsg[PACKET_SIZE];
+
+				snprintf(binder_kmsg, sizeof(binder_kmsg),
+					 "type=Binder,bindertype=free_buffer_full,oneway=1,from_pid=%d,from=%d,target_pid=%d,target=%d;",
+					 current->pid, task_uid(current).val,
+					 proc_task->pid, task_uid(proc_task).val);
+				send_netlink_message(binder_kmsg, strlen(binder_kmsg));
+			}
+			rcu_read_unlock();
+		}
 	}
 	if (is_async &&
 	    alloc->free_async_space < size + sizeof(struct binder_buffer)) {

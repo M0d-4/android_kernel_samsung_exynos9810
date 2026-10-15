@@ -643,6 +643,21 @@ struct max_cpu_capacity {
  * object.
  *
  */
+#ifdef CONFIG_SCHED_EAS_EM
+#include <linux/energy_model.h>
+
+/*
+ * Performance domain: the CPUs sharing a frequency domain, as described by
+ * the Energy Model. One list per root domain (rd->pd), RCU protected.
+ */
+struct perf_domain {
+	struct em_perf_domain *em_pd;
+	struct perf_domain *next;
+	struct rcu_head rcu;
+};
+#define perf_domain_span(pd) (to_cpumask(((pd)->em_pd->cpus)))
+#endif
+
 struct root_domain {
 	atomic_t refcount;
 	atomic_t rto_count;
@@ -687,6 +702,18 @@ struct root_domain {
 
 	/* First cpu with maximum and minimum original capacity */
 	int max_cap_orig_cpu, min_cap_orig_cpu;
+
+#ifdef CONFIG_SCHED_EAS_EM
+	/*
+	 * Indicate whether the system is over-utilized (tipping point): set
+	 * as soon as a CPU is, cleared by a root-level load balance that
+	 * finds none. EAS placement only runs while this is false.
+	 */
+	bool overutilized;
+
+	/* Energy Model performance domains of this root domain */
+	struct perf_domain __rcu *pd;
+#endif
 };
 
 extern struct root_domain def_root_domain;
@@ -1883,6 +1910,39 @@ unsigned long arch_scale_min_freq_capacity(struct sched_domain *sd, int cpu)
 	 * 0, which represents an un-capped state
 	 */
 	return 0;
+}
+#endif
+
+#ifdef CONFIG_SCHED_EAS_EM
+extern void sched_eas_em_rebuild(void);
+extern void rebuild_sched_domains_energy(void);
+#else
+static inline void sched_eas_em_rebuild(void) { }
+static inline void rebuild_sched_domains_energy(void) { }
+#endif
+
+/*
+ * schedutil_cpu_util() - CPU utilization as seen by schedutil.
+ * ENERGY_UTIL:    util to account energy with (CFS + RT, no boost/clamp).
+ * FREQUENCY_UTIL: util used to pick the frequency (freqvar boost + uclamp of
+ *                 the rq and, if given, of the task @p that would be placed
+ *                 on @cpu).
+ */
+enum schedutil_type {
+	ENERGY_UTIL,
+	FREQUENCY_UTIL,
+};
+
+#ifdef CONFIG_CPU_FREQ_GOV_SCHEDUTIL
+unsigned long schedutil_cpu_util(int cpu, unsigned long util_cfs,
+				 unsigned long max, enum schedutil_type type,
+				 struct task_struct *p);
+#else
+static inline unsigned long schedutil_cpu_util(int cpu, unsigned long util_cfs,
+				 unsigned long max, enum schedutil_type type,
+				 struct task_struct *p)
+{
+	return util_cfs;
 }
 #endif
 

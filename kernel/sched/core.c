@@ -55,6 +55,8 @@
 #include <linux/rcupdate.h>
 #include <linux/cpu.h>
 #include <linux/cpuset.h>
+#include <linux/cpufreq.h>
+#include <linux/energy_model.h>
 #include <linux/percpu.h>
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
@@ -6663,10 +6665,170 @@ sd_parent_degenerate(struct sched_domain *sd, struct sched_domain *parent)
 	return 1;
 }
 
+#ifdef CONFIG_SCHED_EAS_EM
+/*
+ * Energy Aware Scheduling perf-domain handling (backport of the mainline
+ * v5.4 kernel/sched/topology.c logic). Perf domains hang off the root
+ * domain and are rebuilt whenever the sched domains are (re)partitioned or
+ * when the Energy Model / governor changes (rebuild_sched_domains_energy()).
+ */
+static DEFINE_MUTEX(sched_energy_mutex);
+static bool sched_energy_update;
+
+static void free_pd(struct perf_domain *pd)
+{
+	struct perf_domain *tmp;
+
+	while (pd) {
+		tmp = pd->next;
+		kfree(pd);
+		pd = tmp;
+	}
+}
+
+static struct perf_domain *find_pd(struct perf_domain *pd, int cpu)
+{
+	while (pd) {
+		if (cpumask_test_cpu(cpu, perf_domain_span(pd)))
+			return pd;
+		pd = pd->next;
+	}
+
+	return NULL;
+}
+
+static struct perf_domain *pd_init(int cpu)
+{
+	struct em_perf_domain *obj = em_cpu_get(cpu);
+	struct perf_domain *pd;
+
+	if (!obj)
+		return NULL;
+
+	pd = kzalloc(sizeof(*pd), GFP_KERNEL);
+	if (!pd)
+		return NULL;
+	pd->em_pd = obj;
+
+	return pd;
+}
+
+static void destroy_perf_domain_rcu(struct rcu_head *rp)
+{
+	free_pd(container_of(rp, struct perf_domain, rcu));
+}
+
+/*
+ * The complexity of the Energy Model is defined as: nr_pd * (nr_cpus + nr_cs)
+ * with nr_pd the number of perf domains, nr_cpus the number of CPUs and nr_cs
+ * the sum of the capacity states of all perf domains. Bail out above this.
+ */
+#define EM_MAX_COMPLEXITY 2048
+
+static bool build_perf_domains(const struct cpumask *cpu_map)
+{
+	int i, nr_pd = 0, nr_cs = 0, nr_cpus = cpumask_weight(cpu_map);
+	struct perf_domain *pd = NULL, *tmp;
+	int cpu = cpumask_first(cpu_map);
+	struct root_domain *rd = cpu_rq(cpu)->rd;
+	struct cpufreq_policy *policy;
+	bool is_sugov;
+
+	/* EAS is enabled for asymmetric CPU capacity topologies. */
+	if (!rcu_access_pointer(per_cpu(sd_asym_cpucapacity, cpu)))
+		goto free;
+
+	for_each_cpu(i, cpu_map) {
+		/* Skip already covered CPUs. */
+		if (find_pd(pd, i))
+			continue;
+
+		/* Do not attempt EAS if schedutil is not being used. */
+		policy = cpufreq_cpu_get(i);
+		if (!policy)
+			goto free;
+		is_sugov = policy->governor &&
+			   !strcmp(policy->governor->name, "schedutil");
+		cpufreq_cpu_put(policy);
+		if (!is_sugov)
+			goto free;
+
+		/* Create the new pd and add it to the local list. */
+		tmp = pd_init(i);
+		if (!tmp)
+			goto free;
+		tmp->next = pd;
+		pd = tmp;
+
+		/*
+		 * Count performance domains and capacity states for the
+		 * complexity check.
+		 */
+		nr_pd++;
+		nr_cs += em_pd_nr_cap_states(pd->em_pd);
+	}
+
+	/* Bail out if the Energy Model complexity is too high. */
+	if (nr_pd * (nr_cs + nr_cpus) > EM_MAX_COMPLEXITY) {
+		pr_warn("sched-eas-em: EM complexity too high (%d), EAS disabled\n",
+			nr_pd * (nr_cs + nr_cpus));
+		goto free;
+	}
+
+	/* Attach the new list of performance domains to the root domain. */
+	tmp = rd->pd;
+	rcu_assign_pointer(rd->pd, pd);
+	if (tmp)
+		call_rcu(&tmp->rcu, destroy_perf_domain_rcu);
+	else if (pd)
+		pr_info("sched-eas-em: %d perf domains attached to root domain (%*pbl)\n",
+			nr_pd, cpumask_pr_args(cpu_map));
+
+	return !!pd;
+
+free:
+	free_pd(pd);
+	tmp = rd->pd;
+	rcu_assign_pointer(rd->pd, NULL);
+	if (tmp)
+		call_rcu(&tmp->rcu, destroy_perf_domain_rcu);
+
+	return false;
+}
+
+/*
+ * Rebuild the perf domains of all root domains, e.g. after the Energy Model
+ * has been (re)registered or the cpufreq governor changed.
+ */
+void rebuild_sched_domains_energy(void)
+{
+	mutex_lock(&sched_energy_mutex);
+	sched_energy_update = true;
+#ifdef CONFIG_CPUSETS
+	rebuild_sched_domains();
+#else
+	get_online_cpus();
+	partition_sched_domains(1, NULL, NULL);
+	put_online_cpus();
+#endif
+	sched_energy_update = false;
+	mutex_unlock(&sched_energy_mutex);
+}
+#else
+static inline void free_pd(struct perf_domain *pd) { }
+static inline bool build_perf_domains(const struct cpumask *cpu_map)
+{
+	return false;
+}
+#endif /* CONFIG_SCHED_EAS_EM */
+
 static void free_rootdomain(struct rcu_head *rcu)
 {
 	struct root_domain *rd = container_of(rcu, struct root_domain, rcu);
 
+#ifdef CONFIG_SCHED_EAS_EM
+	free_pd(rd->pd);
+#endif
 	cpupri_cleanup(&rd->cpupri);
 	cpudl_cleanup(&rd->cpudl);
 	free_cpumask_var(rd->dlo_mask);
@@ -8283,6 +8445,21 @@ match1:
 match2:
 		;
 	}
+
+#ifdef CONFIG_SCHED_EAS_EM
+	/* Build perf. domains: */
+	for (i = 0; i < ndoms_new; i++) {
+		for (j = 0; j < n && !sched_energy_update; j++) {
+			if (cpumask_equal(doms_new[i], doms_cur[j]) &&
+			    cpu_rq(cpumask_first(doms_cur[j]))->rd->pd)
+				goto match3;
+		}
+		/* No match - add perf. domains for a new rd */
+		build_perf_domains(doms_new[i]);
+match3:
+		;
+	}
+#endif
 
 	/* Remember the new sched domains */
 	if (doms_cur != &fallback_doms)

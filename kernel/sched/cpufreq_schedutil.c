@@ -231,21 +231,64 @@ static inline bool use_pelt(void)
 #endif
 }
 
+/* RT utilization of @rq, from the decayed rt_avg, in @max_cap units. */
+static unsigned long sugov_rt_util(struct rq *rq, unsigned long max_cap,
+				   u64 time)
+{
+	unsigned long rt;
+	s64 delta = time - rq->age_stamp;
+
+	if (unlikely(delta < 0))
+		delta = 0;
+	rt = div64_u64(rq->rt_avg, sched_avg_period() + delta);
+	return (rt * max_cap) >> SCHED_CAPACITY_SHIFT;
+}
+
+/**
+ * schedutil_cpu_util - Utilization of @cpu as schedutil sees it.
+ * @cpu:	CPU to compute the utilization of
+ * @util_cfs:	CFS utilization to use (lets EAS evaluate hypothetical
+ *		placements; schedutil itself passes the boosted CFS util)
+ * @max:	capacity of @cpu
+ * @type:	ENERGY_UTIL or FREQUENCY_UTIL (see sched.h)
+ * @p:		task whose uclamp is accounted for FREQUENCY_UTIL, or NULL
+ *
+ * Mirrors the util derivation of sugov_get_util() (same RT term, same
+ * freqvar boost) without touching any rq state, so it can be evaluated for
+ * remote CPUs from the wake-up path. Only FREQUENCY_UTIL applies utilization
+ * clamping, like mainline: the energy of a domain is computed from the actual
+ * work (ENERGY_UTIL) at the frequency schedutil would pick (FREQUENCY_UTIL).
+ */
+unsigned long schedutil_cpu_util(int cpu, unsigned long util_cfs,
+				 unsigned long max, enum schedutil_type type,
+				 struct task_struct *p)
+{
+	struct rq *rq = cpu_rq(cpu);
+	unsigned long util = util_cfs;
+
+	if (likely(use_pelt()))
+		util += sugov_rt_util(rq, max, READ_ONCE(rq->clock));
+
+	if (type == FREQUENCY_UTIL) {
+		util = freqvar_boost_vector(cpu, util);
+		util = min(util, max);
+		if (uclamp_is_used())
+			util = uclamp_rq_util_with(rq, util, p);
+	}
+
+	return min(util, max);
+}
+
 static void sugov_get_util(unsigned long *util, unsigned long *max, u64 time)
 {
 	int cpu = smp_processor_id();
 	struct rq *rq = cpu_rq(cpu);
 	unsigned long max_cap, rt;
-	s64 delta;
 
 	max_cap = arch_scale_cpu_capacity(NULL, cpu);
 
 	sched_avg_update(rq);
-	delta = time - rq->age_stamp;
-	if (unlikely(delta < 0))
-		delta = 0;
-	rt = div64_u64(rq->rt_avg, sched_avg_period() + delta);
-	rt = (rt * max_cap) >> SCHED_CAPACITY_SHIFT;
+	rt = sugov_rt_util(rq, max_cap, time);
 
 #ifdef CONFIG_SCHED_EMS
 	*util = ml_boosted_cpu_util(cpu);
@@ -986,6 +1029,9 @@ static int sugov_start(struct cpufreq_policy *policy)
 							sugov_update_shared :
 							sugov_update_single);
 	}
+
+	/* EAS is only enabled while schedutil drives the frequency domains */
+	sched_eas_em_rebuild();
 	return 0;
 }
 

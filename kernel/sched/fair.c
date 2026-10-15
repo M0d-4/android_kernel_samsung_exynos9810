@@ -5180,6 +5180,17 @@ static void clear_sd_overutilized(struct sched_domain *sd)
 	sd->shared->overutilized = false;
 }
 
+#ifdef CONFIG_SCHED_EAS_EM
+/* Root-domain wide tipping point used by the Energy Model based EAS. */
+static inline void set_rd_overutilized(struct root_domain *rd)
+{
+	if (!READ_ONCE(rd->overutilized))
+		WRITE_ONCE(rd->overutilized, true);
+}
+#else
+static inline void set_rd_overutilized(struct root_domain *rd) { }
+#endif
+
 static inline void update_overutilized_status(struct rq *rq)
 {
 	struct sched_domain *sd;
@@ -5193,8 +5204,10 @@ static inline void update_overutilized_status(struct rq *rq)
 		else
 			overutilized = cpu_overutilized(rq->cpu);
 
-		if (overutilized)
+		if (overutilized) {
 			set_sd_overutilized(sd);
+			set_rd_overutilized(rq->rd);
+		}
 	}
 	rcu_read_unlock();
 }
@@ -7716,6 +7729,8 @@ static bool ontime_sync_allowed(struct task_struct *p)
 	return true;
 }
 
+#include "eas_em.h"
+
 /*
  * select_task_rq_fair: Select target runqueue for the waking task in domains
  * that have the 'sd_flag' flag set. In practice, this is SD_BALANCE_WAKE,
@@ -7755,6 +7770,15 @@ select_task_rq_fair(struct task_struct *p, int prev_cpu, int sd_flag, int wake_f
 		want_affine = (!wake_wide(p) && !_wake_cap &&
 			cpumask_test_cpu(cpu, tsk_cpus_allowed(p)));
 	}
+
+#ifdef CONFIG_SCHED_EAS_EM
+	/* Mainline-style EAS (Energy Model based), opt-in via sysctl */
+	if ((sd_flag & SD_BALANCE_WAKE) && sysctl_sched_eas_em) {
+		target_cpu = find_energy_efficient_cpu(p, prev_cpu);
+		if (target_cpu >= 0)
+			return target_cpu;
+	}
+#endif
 
 	if (sched_feat(EXYNOS_MS)) {
 		target_cpu = exynos_wakeup_balance(p, prev_cpu, sd_flag, sync);
@@ -9661,6 +9685,12 @@ next_group:
 		/* update overload indicator if we are at root domain */
 		if (env->dst_rq->rd->overload != overload)
 			env->dst_rq->rd->overload = overload;
+#ifdef CONFIG_SCHED_EAS_EM
+		/* Root-level balance sees the whole system: authoritative. */
+		WRITE_ONCE(env->dst_rq->rd->overutilized, overutilized);
+	} else if (overutilized) {
+		set_rd_overutilized(env->dst_rq->rd);
+#endif
 	}
 
 	if (overutilized)
@@ -9688,6 +9718,7 @@ next_group:
 		while (sd) {
 			if (sd->flags & SD_ASYM_CPUCAPACITY) {
 				set_sd_overutilized(sd);
+				set_rd_overutilized(env->dst_rq->rd);
 				break;
 			}
 			sd = sd->parent;
@@ -9699,8 +9730,10 @@ next_group:
 	 * needs to be done at the next sched domain level as well.
 	 */
 	if (lb_sd_parent(env->sd) &&
-	    sds->total_capacity * 1024 < sds->total_util * capacity_margin)
+	    sds->total_capacity * 1024 < sds->total_util * capacity_margin) {
 		set_sd_overutilized(env->sd->parent);
+		set_rd_overutilized(env->dst_rq->rd);
+	}
 }
 
 /**

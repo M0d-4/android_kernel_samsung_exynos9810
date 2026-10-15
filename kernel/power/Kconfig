@@ -324,3 +324,35 @@ config FOTA_LIMIT
 	help
 	  Add sysfs to notify limit information to recovery module
 	  /sys/power/fota_limit
+
+config ENERGY_MODEL
+	bool "Energy Model for CPUs"
+	depends on SMP
+	depends on CPU_FREQ
+	default y
+	help
+	  Several subsystems (thermal and/or the task scheduler for example)
+	  can leverage information about the energy consumed by CPUs to make
+	  smarter decisions. This option enables the framework from which
+	  subsystems can access the energy models.
+
+	  This is a backport of the mainline (v5.0) Energy Model framework
+	  to 4.9. On Exynos 9810 it is populated from the EMS energy table.
+
+	  If in doubt, say N.
+
+config SCHED_EAS_EM
+	bool "Mainline-style Energy Aware Scheduling wake-up placement"
+	depends on ENERGY_MODEL && SCHED_EMS && SMP
+	default y
+	help
+	  Adds find_energy_efficient_cpu() (the android-mainline / v5.x EAS
+	  wake-up algorithm) in front of the Exynos EMS wake-up path:
+	  per performance-domain energy estimation from the Energy Model,
+	  schedutil utilization (ENERGY_UTIL / FREQUENCY_UTIL) and uclamp.
+	  Performance domains and the over-utilization flag live in the
+	  root domain. Needs schedutil as cpufreq governor and an asymmetric
+	  CPU capacity topology; otherwise EMS handles the wake-up as before.
+
+	  Enabled at runtime by default; to fall back to plain EMS:
+	      echo 0 > /proc/sys/kernel/sched_eas_em

@@ -381,6 +381,17 @@ static struct ctl_table kern_table[] = {
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec,
 	},
+#ifdef CONFIG_SCHED_EAS_EM
+	{
+		.procname	= "sched_eas_em",
+		.data		= &sysctl_sched_eas_em,
+		.maxlen		= sizeof(unsigned int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &zero,
+		.extra2		= &one,
+	},
+#endif
 #ifdef CONFIG_SCHED_WALT
 	{
 		.procname	= "sched_use_walt_cpu_util",

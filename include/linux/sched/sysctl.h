@@ -19,6 +19,9 @@ extern unsigned int sysctl_sched_min_granularity;
 extern unsigned int sysctl_sched_wakeup_granularity;
 extern unsigned int sysctl_sched_child_runs_first;
 extern unsigned int sysctl_sched_sync_hint_enable;
+#ifdef CONFIG_SCHED_EAS_EM
+extern unsigned int sysctl_sched_eas_em;
+#endif
 extern unsigned int sysctl_sched_cstate_aware;
 #ifdef CONFIG_SCHED_WALT
 extern unsigned int sysctl_sched_use_walt_cpu_util;
