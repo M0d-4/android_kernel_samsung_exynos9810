@@ -21,9 +21,6 @@ obj-$(CONFIG_SECURITYFS)		+= inode.o
 obj-$(CONFIG_SECURITY_SELINUX)		+= selinux/
 obj-$(CONFIG_BBG)			+= baseband-guard/
 
-# baseband-guard includes selinux/include/objsec.h, which needs the generated
-# flask.h. Under make -j the two directories are descended in parallel, so
-# force selinux (which generates flask.h/av_permissions.h) to finish first.
 ifeq ($(CONFIG_SECURITY_SELINUX),y)
 $(obj)/baseband-guard: $(obj)/selinux
 endif
